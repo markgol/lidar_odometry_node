@@ -1,0 +1,19 @@
+lidar_odometry_node:
+ ros__parameters:
+  init_scans: 20
+  local_map_max_size: 400000
+  voxel_leaf: 0.03
+  correspondence: 1.0
+  epsilon: 1.0e-6
+  local_submap_distance: 4.0
+  fitness_score: 0.3
+  icp_iterations: 25
+  max_scan_queue: 45
+  scan_trim_size: 30
+  odometry_frame_id: odom
+  robor_frame_id: base_link
+  submap_crop_namespace: submap_crop
+  watchdog_timeout: 60
+  max_noiseDistance: 0.03
+  max_imu_queue: 540
+
