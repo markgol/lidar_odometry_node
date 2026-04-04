@@ -16,4 +16,4 @@ lidar_odometry_node:
   watchdog_timeout: 60
   max_noiseDistance: 0.03
   max_imu_queue: 540
-
+  EnableCropDistance: true

@@ -189,6 +189,7 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<double>("correspondence", 1.0); // meters
     declare_parameter<double>("epsilon", 1.0e-6);
     declare_parameter<double>("local_submap_distance", 4.0);   // meters
+    declare_parameter<bool>("EnableCropDistance", false);
     declare_parameter<double>("fitness_score", 0.3); // LSQ fit mean squared distance in meters
     declare_parameter<double>("max_noiseDistance", 0.03); // distance in meters
     declare_parameter<int>("icp_iterations", 25); // 20-50
@@ -214,8 +215,9 @@ lidar_odometry_node::lidar_odometry_node()
     get_parameter("correspondence", correspondence_);
     get_parameter("epsilon", epsilon_);
     get_parameter("local_submap_distance", local_submap_distance_);
+    get_parameter("EnableCropDistance", EnableCropDistance_);
     get_parameter("fitness_score", fitness_score_);
-    get_parameter("max_noiseDistance", max_noiseDistance_);
+    get_parameter("max_noiseDistance", max_noiseDistance_);    
     get_parameter("icp_iterations", icp_iterations_);
     get_parameter("max_scan_queue", max_scan_queue_);
     get_parameter("max_imu_queue", max_imu_queue_);
@@ -291,10 +293,6 @@ lidar_odometry_node::lidar_odometry_node()
     //  In production only map path will be used
     path_pub_ = create_publisher<nav_msgs::msg::Path>(
         "/path", 10); // queue size = 10
-
-    // ICP crop bounding box publisher
-    crop_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>(
-        "submap_crop_marker", 1); // queue size = 1
 
     RCLCPP_INFO(get_logger(), "Lidar Odometry Node Initialized");
 }
@@ -404,7 +402,20 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     // only get here after initial local map creation
 
     // crop local map by distance for robot
-    pcl::PointCloud<pcl::PointXYZI>::Ptr submap = CropDistance(local_map_, local_submap_distance_);
+    auto start = std::chrono::steady_clock::now();
+    double msec;
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr submap;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr subscan;
+
+    if(EnableCropDistance_) {
+        submap = CropDistance(local_map_, local_submap_distance_);
+        subscan = CropDistance(base_link_scan_, local_submap_distance_);
+        auto end = std::chrono::steady_clock::now();
+        msec = std::chrono::duration<double, std::milli>(end-start).count();
+
+        RCLCPP_INFO(get_logger(), "Crop time: %.1f ms", msec);
+    }
 
     // Make intial guess for scan position
     // Currently this is using the ICP matching process to estimate movement.
@@ -424,12 +435,18 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     // on the translation component of deltaTransform
     Eigen::Vector3f dt = deltaTransform_.block<3,1>(0,3);
     double distance = dt.norm(); // in meters
+    // time how long ICP takes to process
 
     calculateStats(
         distance,
         &avgDistance_, &sigmaDistance_,
         1.0/(5.55*3.0)  // last 3 seconds running stats
     );
+
+    RCLCPP_INFO(get_logger(),
+                "odom distance noise: mean %.5f  std dev: %.5f",
+                avgDistance_,
+                sqrt(sigmaDistance_));
 
     // use 2 std dev above mean translation delta as limit
     double noise_limit;
@@ -455,24 +472,27 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
 
     // --- ICP ALIGNMENT ---
     // current scan in base_link frame reference
-    icp.setInputSource(base_link_scan_);
-
-    // current odom_map_ limited but crop box (in odom frame reference)
-    icp.setInputTarget(submap); // align to the local_map_ (submap)
+    if(EnableCropDistance_) {
+        icp.setInputSource(subscan);
+        icp.setInputTarget(submap); // align to the local_map_ (submap)
+    } else {
+        icp.setInputSource(base_link_scan_);
+        icp.setInputTarget(local_map_); // align to the local_map_ (submap)
+    }
 
     pcl::PointCloud<pcl::PointXYZI> aligned;
 
     // time how long ICP takes to process
-    auto start = std::chrono::steady_clock::now();
+    start = std::chrono::steady_clock::now();
 
     // align using current odom pose guess
     icp.align(aligned,quess); // start from internal starting guess
                         // guess should be added when better understood
 
     auto end = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(end-start).count();
+    msec = std::chrono::duration<double, std::milli>(end-start).count();
 
-    RCLCPP_INFO(get_logger(), "ICP time: %.1f ms", ms);
+    RCLCPP_INFO(get_logger(), "ICP time: %.1f ms", msec);
 
     NumberOfScans_++;
 

@@ -203,6 +203,7 @@ private:    // private class variables
     int icp_iterations_; // ICP max iterations parameter (config param)
     double epsilon_; // ICP epsilon parameter (config param)
     double local_submap_distance_; // size in meters of crop box for local_map_ used in ICP (config param)
+    bool EnableCropDistance_; // enable use of crop distance in local map and scan for odometry
     double fitness_score_; // worst fitness value that is still acceptable as fit from ICP (config param)
                            // The larger the number the worse then fit (mean squared error of the fit)
 
@@ -247,9 +248,6 @@ private:    // private class variables
     // path publisher
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     nav_msgs::msg::Path path_msg_;
-
-    // bounding ICP box (crop box) publisher
-    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr crop_marker_pub_;
 
     // watchdog
     rclcpp::Time last_msg_time_;
