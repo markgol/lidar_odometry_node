@@ -200,6 +200,10 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<std::string>("robot_frame_id", "base_link");
     declare_parameter<std::string>("submap_crop_namespace", "submap_crop");
     declare_parameter<long>("watchdog_timeout", 40);
+    declare_parameter<double>("keyframe_translation_thresh", 0.5); //0.4-0.7m
+    declare_parameter<double>("keyframe_rotation_thresh", 0.3); // radians (~17 degrees)
+    declare_parameter<double>("keyframe_min_translation_for_rotation", 0.1); // 0.1m
+    declare_parameter<double>("keyframe_last_frame_time", 2.0); // 0.1m
 
     // Number of static position scans to acquire for the initial local map
     // before processing starts
@@ -225,6 +229,12 @@ lidar_odometry_node::lidar_odometry_node()
     get_parameter("odometry_frame_id", odometry_frame_id_);
     get_parameter("robot_frame_id", robot_frame_id_);
     get_parameter("submap_crop_namespace", submap_crop_namespace_);
+
+    // Keyframe parameters
+    get_parameter("keyframe_translation_thresh", keyframe_translation_thresh_);
+    get_parameter("keyframe_rotation_thresh", keyframe_rotation_thresh_);
+    get_parameter("keyframe_min_translation_for_rotation", keyframe_min_translation_for_rotation_ );
+    get_parameter("keyframe_last_frame_time", keyframe_last_frame_time_);
 
     // --------- Watchdog timer settings---------------
     get_parameter("watchdog_timeout", watchdog_timeout_); // in seconds
@@ -282,6 +292,15 @@ lidar_odometry_node::lidar_odometry_node()
     watchdog_timer_ = this->create_wall_timer(std::chrono::seconds(1),  // coarse check is sufficient
                                               [this]() { watchdogCheck(); }
                                               );
+
+    // Keyframe publishers
+    keyframe_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
+        "/lidar/keyframes/pose", 10);
+
+    keyframe_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/lidar/keyframes/cloud", 10);
+
+    last_keyframe_time_ = this->get_clock()->now();
 
     // diagnostic publisher for aligned frame
     aligned_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
@@ -599,6 +618,29 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     // --- UPDATE LOCAL MAP ---
     // Also add the aligned scan to the local_map_
     *local_map_ += aligned;
+
+    // --- KEYFRAME EXTRACTION ---
+    if (shouldCreateKeyframe(T_odom_base_)) {
+        pcl::PointCloud<pcl::PointXYZI>::Ptr full_aligned(
+            new pcl::PointCloud<pcl::PointXYZI>);
+
+        // aways use full scan for keyframe, never cropped
+        pcl::transformPointCloud(
+            *base_link_scan_,
+            *full_aligned,
+            T_alignment);
+
+        publishKeyframe(
+            T_odom_base_,
+            full_aligned,
+            msg->header.stamp
+        );
+
+        last_keyframe_pose_ = T_odom_base_;
+        first_keyframe_ = false;
+
+        RCLCPP_INFO(get_logger(), "Keyframe created");
+    }
 
     // trim local map to max local map size
     // trimming is bascially being controled by the local_map_max_size_

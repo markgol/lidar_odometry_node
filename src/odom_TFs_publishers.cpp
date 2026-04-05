@@ -201,6 +201,45 @@ void lidar_odometry_node::publishPath(Eigen::Matrix4f Transform,
 }
 
 //--------------------------------------------------------
+//
+//  publishKeyframe()
+//
+//--------------------------------------------------------
+void lidar_odometry_node::publishKeyframe(
+    const Eigen::Matrix4f& pose,
+    const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
+    const rclcpp::Time& stamp)
+{
+    // --- Pose ---
+    geometry_msgs::msg::PoseStamped pose_msg;
+    pose_msg.header.stamp = stamp;
+    pose_msg.header.frame_id = odometry_frame_id_;
+
+    Eigen::Matrix3f R = pose.block<3,3>(0,0);
+    Eigen::Quaternionf q(R);
+
+    pose_msg.pose.position.x = pose(0,3);
+    pose_msg.pose.position.y = pose(1,3);
+    pose_msg.pose.position.z = pose(2,3);
+
+    pose_msg.pose.orientation.x = q.x();
+    pose_msg.pose.orientation.y = q.y();
+    pose_msg.pose.orientation.z = q.z();
+    pose_msg.pose.orientation.w = q.w();
+
+    keyframe_pose_pub_->publish(pose_msg);
+
+    // --- Cloud ---
+    sensor_msgs::msg::PointCloud2 cloud_msg;
+    pcl::toROSMsg(*cloud, cloud_msg);
+
+    cloud_msg.header.stamp = stamp;
+    cloud_msg.header.frame_id = odometry_frame_id_;
+
+    keyframe_cloud_pub_->publish(cloud_msg);
+}
+
+//--------------------------------------------------------
 //  initStaticTF
 //  This is used to acquire the static TFs needed that
 //  are published by the l2lidar_node
@@ -362,4 +401,53 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr lidar_odometry_node::CropDistance(
     cropped->is_dense = cloud->is_dense;
 
     return cropped;
+}
+
+//--------------------------------------------------------
+//  shouldCreateKeyframe
+//--------------------------------------------------------
+bool lidar_odometry_node::shouldCreateKeyframe(const Eigen::Matrix4f& current_pose)
+{
+    if (first_keyframe_) {
+        return true;
+    }
+
+    Eigen::Matrix4f delta = last_keyframe_pose_.inverse() * current_pose;
+
+    // translation
+    Eigen::Vector3f dt = delta.block<3,1>(0,3);
+    double distance = dt.norm();
+
+    // rotation
+    Eigen::Matrix3f R = delta.block<3,3>(0,0);
+    Eigen::Quaternionf q(R);
+    double angle = 2.0 * std::acos(std::abs(q.w()));
+
+    // --- KEY LOGIC ---
+
+    double dynamic_thresh = avgDistance_ + 2.0 * sqrt(sigmaDistance_);
+    dynamic_thresh = std::min(dynamic_thresh, keyframe_translation_thresh_);
+    auto now = this->get_clock()->now();
+
+    if (distance > dynamic_thresh) {
+        last_keyframe_time_ = now;
+        return true;
+    }
+
+    if ((now - last_keyframe_time_).seconds() > keyframe_last_frame_time_) {
+        last_keyframe_time_ = now;
+        return true;
+    }
+
+    // if (distance > keyframe_translation_thresh_) {
+    //     return true;
+    // }
+
+    if (distance > keyframe_min_translation_for_rotation_ &&
+        angle > keyframe_rotation_thresh_) {
+        last_keyframe_time_ = now;
+        return true;
+    }
+
+    return false;
 }

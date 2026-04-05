@@ -130,6 +130,15 @@ private:    // private class methods
         const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud,
         double Distance);
 
+    // publisher for Keyframes
+    void publishKeyframe(
+        const Eigen::Matrix4f& pose,
+        const pcl::PointCloud<pcl::PointXYZI>::Ptr& cloud,
+        const rclcpp::Time& stamp);
+    // Keyframe save logic
+    bool shouldCreateKeyframe(const Eigen::Matrix4f& current_pose);
+
+
 private:    // private class variables
 
     // ---------------------
@@ -218,6 +227,21 @@ private:    // private class variables
     double max_noiseDistance_ {0.03}; // in meters
 
     //------------------------------------------
+    // Keyframe support
+    //------------------------------------------
+    double keyframe_translation_thresh_;
+    double keyframe_rotation_thresh_;
+    double keyframe_min_translation_for_rotation_;
+    double keyframe_last_frame_time_;
+
+    Eigen::Matrix4f last_keyframe_pose_ = Eigen::Matrix4f::Identity();
+    bool first_keyframe_ = true;
+
+    // Keyframe publishers
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr keyframe_pose_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr keyframe_cloud_pub_;
+
+    //------------------------------------------
     // IMU support (not yet implemented, skeleton only)
     //------------------------------------------
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
@@ -248,6 +272,9 @@ private:    // private class variables
     // path publisher
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     nav_msgs::msg::Path path_msg_;
+
+    // Keyframe time
+    rclcpp::Time last_keyframe_time_;
 
     // watchdog
     rclcpp::Time last_msg_time_;
