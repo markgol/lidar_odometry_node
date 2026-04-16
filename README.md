@@ -358,4 +358,4 @@ This node is designed for **modular SLAM system integration**, emphasizing:
 
 ## Version
 
-V0.5.0    2026-04-15    Initial implementation
+V0.5.0    2026-04-15    This is the initial public release.  It is operable but has not been fully tested.  It has further development that is being done.  This initial release is part of the projects larger over-all skelelon for SLAM operation.  It explcitily does not use IMU or other odometrty sensors. It relies purely in ICP SE(3) matching to determine odometry.  It has additional noise filtering to detect when the platform is not moving.  This was done to reduce drift accuuktaiton when the platform isn't moving.  It also has a radius crop of the local map in order to reduce process requirements.  The node assumes that the plaform is fixed and stationary when it first starts.  This  create a local map of the platform's location.
