@@ -95,6 +95,7 @@
 //                          to typical ROS2 topics and IDs
 //                          Refactored to use more helper methods for publishing
 //                          so that code is easier to follow.
+//      V0.5.0  2026-04-06  Added keyframe publshing for SLAM
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -108,7 +109,7 @@
 void lidar_odometry_node::publishOdometry(const rclcpp::Time &stamp)
 {
     //------------------------------------------
-    // publish Odom->lidar
+    // publish Odom->base
     //------------------------------------------
     Eigen::Matrix3f R = T_odom_base_.block<3,3>(0,0);
     Eigen::Vector3f t = T_odom_base_.block<3,1>(0,3);
@@ -129,6 +130,9 @@ void lidar_odometry_node::publishOdometry(const rclcpp::Time &stamp)
     odom.pose.pose.orientation.w = q.w();
 
     odom_pub_->publish(odom);
+    // if((NumberOfScans_%1000) == 999) {
+    //     return;
+    // }
 }
 
 //--------------------------------------------------------
@@ -438,10 +442,6 @@ bool lidar_odometry_node::shouldCreateKeyframe(const Eigen::Matrix4f& current_po
         last_keyframe_time_ = now;
         return true;
     }
-
-    // if (distance > keyframe_translation_thresh_) {
-    //     return true;
-    // }
 
     if (distance > keyframe_min_translation_for_rotation_ &&
         angle > keyframe_rotation_thresh_) {

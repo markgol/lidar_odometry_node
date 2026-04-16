@@ -130,6 +130,11 @@
 //                          to typical ROS2 topics and IDs
 //                          Refactored to use more helper methods for publishing
 //                          so that code is easier to follow.
+//      V0.5.0  2026-04-06  Added keyframe publshing for SLAM
+//                          Updated QOS settings for publishers and subscribers
+//                          Added detection of "/imu/data" topic (from l2lidar_node)
+//                          Currently this node does not process the L2 IMU data but the
+//                          skeletal framwork is in place.
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -164,6 +169,10 @@ void lidar_odometry_node::watchdogCheck()
 
     auto elapsed = this->get_clock()->now() - last_msg_time_;
 
+    // The wathdog timer triggers no subscriber topic data is received
+    // for a period of time (watchdog_timeout_).
+    // This can occur when the lidar sensor is powered down or has some type
+    // of fault.  It also occurs if the l2lidar_node exits or hangs.
     if (elapsed > rclcpp::Duration::from_seconds(watchdog_timeout_)) {
         shutdown_triggered_ = true;
 
@@ -198,12 +207,15 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<int>("scan_trim_size", 30); // 20-50
     declare_parameter<std::string>("odometry_frame_id", "odom");
     declare_parameter<std::string>("robot_frame_id", "base_link");
-    declare_parameter<std::string>("submap_crop_namespace", "submap_crop");
     declare_parameter<long>("watchdog_timeout", 40);
     declare_parameter<double>("keyframe_translation_thresh", 0.5); //0.4-0.7m
     declare_parameter<double>("keyframe_rotation_thresh", 0.3); // radians (~17 degrees)
     declare_parameter<double>("keyframe_min_translation_for_rotation", 0.1); // 0.1m
-    declare_parameter<double>("keyframe_last_frame_time", 2.0); // 0.1m
+    declare_parameter<double>("keyframe_last_frame_time", 2.0); // 2 sec
+    declare_parameter<std::string>("keyframe_pose_topic", "/lidar/keyframes/pose");
+    declare_parameter<std::string>("keyframe_point_topic", "/lidar/keyframes/cloud");
+    declare_parameter<std::string>("aligned_scan_topic", "/aligned_scan");
+    declare_parameter<std::string>("path_topic", "/path");
 
     // Number of static position scans to acquire for the initial local map
     // before processing starts
@@ -228,16 +240,21 @@ lidar_odometry_node::lidar_odometry_node()
     get_parameter("scan_trim_size", scan_trim_size_);
     get_parameter("odometry_frame_id", odometry_frame_id_);
     get_parameter("robot_frame_id", robot_frame_id_);
-    get_parameter("submap_crop_namespace", submap_crop_namespace_);
 
     // Keyframe parameters
     get_parameter("keyframe_translation_thresh", keyframe_translation_thresh_);
     get_parameter("keyframe_rotation_thresh", keyframe_rotation_thresh_);
     get_parameter("keyframe_min_translation_for_rotation", keyframe_min_translation_for_rotation_ );
     get_parameter("keyframe_last_frame_time", keyframe_last_frame_time_);
+    get_parameter("keyframe_pose_topic", keyframe_pose_topic_);
+    get_parameter("keyframe_point_topic", keyframe_point_topic_);
 
-    // --------- Watchdog timer settings---------------
+    // --------- Watchdog timer settings --------------
     get_parameter("watchdog_timeout", watchdog_timeout_); // in seconds
+
+    // --------- debug publishers ---------------------
+    get_parameter("aligned_scan_topic", aligned_scan_topic_);
+    get_parameter("path_topic", path_topic_);
 
     // init scan_queue_ to empty
     scan_queue_.clear();
@@ -250,10 +267,21 @@ lidar_odometry_node::lidar_odometry_node()
     );
 
     // subcribe to the l2lidar_node publisher /imu
-    imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-        "/imu",
-        rclcpp::SensorDataQoS(),    // this is important, do not change
-        std::bind(&lidar_odometry_node::imuCallback, this, std::placeholders::_1));
+    // if the l2lidar_node is publishing IMU data
+    {
+        auto publishers = this->get_publishers_info_by_topic("/imu/data");
+
+        if (publishers.empty()) {
+            // Publisher does not exist
+            RCLCPP_INFO(get_logger(), "Lidar Odometry Node no IMU subscription");
+        } else {
+            // Publisher exists
+            imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+                "/imu",
+                rclcpp::SensorDataQoS(),    // this is important, do not change
+                std::bind(&lidar_odometry_node::imuCallback, this, std::placeholders::_1));
+        }
+    }
 
     // create new publisher /odom
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10); // queue size = 10
@@ -295,23 +323,23 @@ lidar_odometry_node::lidar_odometry_node()
 
     // Keyframe publishers
     keyframe_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
-        "/lidar/keyframes/pose", 10);
+        keyframe_pose_topic_, 10);
 
     keyframe_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-        "/lidar/keyframes/cloud", 10);
+        keyframe_point_topic_, 10);
 
     last_keyframe_time_ = this->get_clock()->now();
 
     // diagnostic publisher for aligned frame
     aligned_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
-        "/aligned_scan", 10); // queue size = 10
+        aligned_scan_topic_, 10); // queue size = 10
     //last_publish_time_ = now();
 
     // diagnostic path publisher
     //  In development this will be used for publishing both map and odom paths
     //  In production only map path will be used
     path_pub_ = create_publisher<nav_msgs::msg::Path>(
-        "/path", 10); // queue size = 10
+        path_topic_, 10); // queue size = 10
 
     RCLCPP_INFO(get_logger(), "Lidar Odometry Node Initialized");
 }
@@ -625,10 +653,16 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
             new pcl::PointCloud<pcl::PointXYZI>);
 
         // aways use full scan for keyframe, never cropped
+        // scan is the full scan but needs to be TF to T_base_lidar
+        // base_link_scan_ is downsampled
+        pcl::PointCloud<pcl::PointXYZI>::Ptr TFscan(
+            new pcl::PointCloud<pcl::PointXYZI>);
+        TFscan = TFPointCloud(scan, T_base_lidar_);
+
         pcl::transformPointCloud(
-            *base_link_scan_,
+            *TFscan,
             *full_aligned,
-            T_alignment);
+            T_alignment); // now odom_base
 
         publishKeyframe(
             T_odom_base_,

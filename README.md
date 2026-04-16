@@ -1,4 +1,4 @@
-### Updated 2025-04-05 V0.5.0
+### Updated 2025-04-15 V0.5.0
 
 lidar_odometry_node
 ===================
@@ -27,8 +27,6 @@ Key Features
 
 * Keyframe extraction with adaptive thresholds
 
-* IMU-assisted rotation correction (external to this node)
-
 * ROS2-native publishers, subscribers, and TF integration
 
 * * *
@@ -38,17 +36,11 @@ System Assumptions
 
 This node assumes the following about the incoming data:
 
-* LiDAR provides **full 360° field-of-view**
+* LiDAR provides **full 360° field-of-view 3D point cloud**
 
-* Point clouds are:
-  
-  * **gravity-aligned**
-  
-  * **rotation-corrected** using IMU (upstream)
+* Point clouds are: **pose corrected using IMU quaternion**  (in the L2lidar_node)
 
-* Input clouds are effectively aligned with the `base_link` frame (rotation-wise)
-
-* ICP primarily estimates **translational motion**, with only minor rotational refinement
+* Input clouds are effectively aligned with the `base_link` frame
 
 * * *
 
@@ -61,11 +53,13 @@ Node Responsibilities
   LiDAR point cloud data
 
 * `/imu` (`sensor_msgs/msg/Imu`)  
-  IMU data (used upstream for rotation correction)
+  IMU data (optional for future use)
 
 * * *
 
 ### Publishes
+
+Topic names are input from the config yaml file.  These are the default names.
 
 * `/odom` (`nav_msgs/msg/Odometry`)  
   Incremental odometry estimate
@@ -136,15 +130,15 @@ Keyframes are generated to support downstream SLAM (e.g., pose graph optimizatio
 
 Keyframes are generated using:
 
-* **Primary trigger:** translation threshold
+* **Primary trigger:** translation threshold ( large distance move)
 
-* **Secondary trigger:** rotation gated by minimum translation
+* **Secondary trigger:** rotation gated by minimum translation (small distance move)
 
 * **Adaptive thresholding:** based on motion noise statistics
 
 This avoids false positives caused by:
 
-* IMU noise
+* IMU noise (IMU is currently not used here but noise can effect pose in the l2lidar_node)
 
 * small ICP corrections
 
@@ -155,45 +149,64 @@ This avoids false positives caused by:
 Parameters
 ----------
 
-### Core Parameters
+### ICP parameters
 
-| Parameter        | Type   | Description                 |
-| ---------------- | ------ | --------------------------- |
-| `voxel_leaf`     | double | Downsampling leaf size      |
-| `correspondence` | double | ICP correspondence distance |
-| `epsilon`        | double | ICP convergence threshold   |
-| `icp_iterations` | int    | Maximum ICP iterations      |
-
-* * *
-
-### Map Parameters
-
-| Parameter               | Type   | Description                                |
-| ----------------------- | ------ | ------------------------------------------ |
-| `local_map_max_size`    | int    | Maximum number of points in local map      |
-| `scan_trim_size`        | int    | Number of scans retained in sliding window |
-| `local_submap_distance` | double | Crop radius (if enabled)                   |
+| Parameter         | Type   | Description                                         | default value |
+| ----------------- | ------ | --------------------------------------------------- | ------------- |
+| `voxel_leaf`      | double | Downsampling leaf size                              | 0.03          |
+| `correspondence`  | double | ICP correspondence distance                         | 1.0           |
+| `epsilon`         | double | ICP convergence threshold                           | 1.0e-6        |
+| fitness_score     | double | ICP fitness threshold                               | 0.3           |
+| icp_iterations    | int    | Max. number ICP iterations                          | 25            |
+| max_noiseDistance | double | Max noise threshold for motion estimation in meters | 0.03          |
 
 * * *
 
-### Keyframe Parameters
+### Map parameters
 
-| Parameter                               | Type   | Description                                       |
-| --------------------------------------- | ------ | ------------------------------------------------- |
-| `keyframe_translation_thresh`           | double | Translation threshold (meters)                    |
-| `keyframe_rotation_thresh`              | double | Rotation threshold (radians)                      |
-| `keyframe_min_translation_for_rotation` | double | Minimum translation required to consider rotation |
+| Parameter               | Type   | Description                                                                               | default value |
+| ----------------------- | ------ | ----------------------------------------------------------------------------------------- | ------------- |
+| init_scans              | int    | Number of scan in initial map                                                             | 20            |
+| `local_map_max_size`    | int    | Maximum number of points in local map                                                     | 400000        |
+| `scan_trim_size`        | int    | max number of last scans to use to reset the local map when it exceeds the local map size | 30            |
+| `local_submap_distance` | double | Crop radius in meters  (if enabled)                                                       | 4.0           |
+| EnableCropDistance      | bool   | Enable crop of local map                                                                  | true          |
+| max_scan_queue          | int    | max scan queue size                                                                       | 45            |
 
 * * *
 
-### Other Parameters
+### Keyframe parameters
 
-| Parameter            | Type   | Description                               |
-| -------------------- | ------ | ----------------------------------------- |
-| `EnableCropDistance` | bool   | Enable cropping for ICP input             |
-| `fitness_score`      | double | ICP fitness threshold                     |
-| `max_noiseDistance`  | double | Max noise threshold for motion estimation |
-| `watchdog_timeout`   | int    | Timeout for incoming data                 |
+| Parameter                               | Type   | Description                                       | default value |
+| --------------------------------------- | ------ | ------------------------------------------------- | ------------- |
+| `keyframe_translation_thresh`           | double | Translation threshold (meters)                    | 0.5           |
+| `keyframe_rotation_thresh`              | double | Rotation threshold (radians)                      | 0.3           |
+| `keyframe_min_translation_for_rotation` | double | Minimum translation required to consider rotation | 0.1           |
+| keyframe_last_frame_time                | double | minimum keyframe publish rate in seconds          | 2.0           |
+
+* * *
+
+### Topic and frame parameters
+
+| Parameter            | Type   | Description                               | default value          |
+| -------------------- | ------ | ----------------------------------------- | ---------------------- |
+| robot_frame_id       | string | robot frame                               | base_link              |
+| odometry_frame_id    | string | odometry frame                            | odom                   |
+| odom_topic           | string | odometry topic                            | /odom                  |
+| keyframe_pose_topic  | string | keyframe robot pose topic                 | /lidar/keyframes/pose  |
+| keyframe_point_topic | string | keyframe point cloud topic                | /lidar/keyframes/cloud |
+| path_topic           | string | diagnostic local robot path topic         | /path                  |
+| aligned_scan_topic   | string | diagnostic aligned scan point cloud topic | /aligned_scan          |
+
+***
+
+### Other parameters
+
+| Parameter        | Type | Description                                                           | default value |
+| ---------------- | ---- | --------------------------------------------------------------------- | ------------- |
+| watchdog_timeout | int  | node stops if no subcription data received for this number of seconds | 60            |
+|                  |      |                                                                       |               |
+| max_imu_queue    | int  | FIFO queue of IMU packets (only if enabled)                           | 540           |
 
 * * *
 
@@ -204,9 +217,9 @@ Local Map Behavior
 
 * Limits computational cost of ICP
 
-* Periodically trims and rebuilds based on queue
+* Periodically trims and rebuilds based on scan queue
 
-* Optionally cropped to improve performance
+* Optionally cropped by distance for ICP matching to improve performance (only the local map is cropped, keyframes are without cropping)
 
 * * *
 
@@ -237,7 +250,7 @@ This separation ensures:
 
 * This frame is **locally consistent but drifts over time**
 
-* Global correction is handled by a downstream SLAM node
+* Global correction will be handled by the SLAM node
 
 * * *
 
@@ -287,8 +300,6 @@ Limitations
 
 * Drift accumulates over time
 
-* Assumes rotation correction is handled upstream
-
 * * *
 
 Integration
@@ -337,16 +348,14 @@ This node is designed for **modular SLAM system integration**, emphasizing:
 
 * real-time performance
 
-* clean separation of concerns
+* clean separation of processing concerns
 
 * extensibility toward full SLAM
 
-* This utilizes data pulished from the l2lidar_node V0.2.2
+* This utilizes data pulished from the l2lidar_node V0.2.3
 
 * * *
 
 ## Version
 
-V0.5.0    2026-04-05    Initial implelementation RC1
-
-
+V0.5.0    2026-04-15    Initial implementation

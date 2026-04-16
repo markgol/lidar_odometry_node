@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 # C must be included because of inclusion of MPI
 project(lidar_odometry_node
-  VERSION 0.4.0
+  VERSION 0.5.0
   LANGUAGES C CXX
 )
 

@@ -7,13 +7,16 @@ Panels:
         - /Global Options1
         - /Status1
         - /TF1
+        - /TF1/Status1
+        - /TF1/Frames1
         - /PointCloud21
+        - /PointCloud21/Status1
         - /PointCloud22
+        - /PointCloud22/Status1
+        - /PointCloud22/Autocompute Value Bounds1
         - /Odometry1
         - /Odometry1/Shape1
-        - /Path1
         - /Path1/Topic1
-        - /Marker1
       Splitter Ratio: 0.3991031348705292
     Tree Height: 732
   - Class: rviz_common/Selection
@@ -61,7 +64,7 @@ Visualization Manager:
       Filter (whitelist): ""
       Frame Timeout: 15
       Frames:
-        All Enabled: true
+        All Enabled: false
         base_link:
           Value: true
         l2lidar_frame:
@@ -96,7 +99,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: Intensity
       Decay Time: 20
-      Enabled: true
+      Enabled: false
       Invert Rainbow: true
       Max Color: 255; 255; 255
       Max Intensity: 3.5
@@ -116,7 +119,7 @@ Visualization Manager:
         Value: /points
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -128,7 +131,7 @@ Visualization Manager:
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
       Color Transformer: FlatColor
-      Decay Time: 2
+      Decay Time: 30
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
@@ -167,7 +170,7 @@ Visualization Manager:
           Scale: 1
           Value: true
         Value: true
-      Enabled: true
+      Enabled: false
       Keep: 200
       Name: Odometry
       Position Tolerance: 0.10000000149011612
@@ -188,7 +191,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /odom
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
@@ -217,23 +220,10 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /path
       Value: true
-    - Class: rviz_default_plugins/Marker
-      Enabled: true
-      Name: Marker
-      Namespaces:
-        submap_crop: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /submap_crop_marker
-      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: base_link
+    Fixed Frame: odom
     Frame Rate: 30
   Name: root
   Tools:
@@ -276,7 +266,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 0.8922744989395142
+      Distance: 8.168928146362305
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -291,10 +281,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.7147970795631409
+      Pitch: 0.3997965455055237
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 1.6554076671600342
+      Yaw: 6.055403709411621
     Saved: ~
 Window Geometry:
   Displays:

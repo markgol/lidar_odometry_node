@@ -37,6 +37,8 @@
 //                          to typical ROS2 topics and IDs
 //                          Refactored to use more helper methods for publishing
 //                          so that code is easier to follow.
+//      V0.5.0  2026-04-06  Added keyframe publshing for SLAM
+//                          Get topic names for publishing from config file
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -125,7 +127,7 @@ private:    // private class methods
         const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud,
         const Eigen::Matrix4f &T);
 
-    // Crop cloud using distance method
+    // Crop point cloud using distance method
     pcl::PointCloud<pcl::PointXYZI>::Ptr CropDistance(
         const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud,
         double Distance);
@@ -172,10 +174,7 @@ private:    // private class variables
     // ---------------------
     // all transforms start as identity
     // and must be changed with data that is read in
-    //Eigen::Matrix4f T_map_base_ = Eigen::Matrix4f::Identity();   // robot pose in map frame
-    ///Eigen::Matrix4f T_map_odom_ = Eigen::Matrix4f::Identity();   // odom frame in map frame
     Eigen::Matrix4f T_odom_base_ = Eigen::Matrix4f::Identity();  // odom frame in base frame
-    //Eigen::Matrix4f T_odom_lidar_ = Eigen::Matrix4f::Identity(); // odom -> l2liar_frame
     Eigen::Matrix4f T_base_lidar_ = Eigen::Matrix4f::Identity(); // base_link -> l2lidar_frame
     Eigen::Matrix4f T_lidar_imu_ = Eigen::Matrix4f::Identity();  // l2lidar_frame -> l2lidar_imu
     Eigen::Matrix4f T_base_imu_ = Eigen::Matrix4f::Identity();   // base_link -> l2lidar_imu
@@ -186,7 +185,6 @@ private:    // private class variables
 
     std::string odometry_frame_id_; // odometry frame ID
     std::string robot_frame_id_; // robot frame ID
-    std::string submap_crop_namespace_; // submap crop box namespace
 
     // ---------------------
     // Initial map accumulation, only used during the initial map accumulation phase
@@ -241,6 +239,12 @@ private:    // private class variables
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr keyframe_pose_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr keyframe_cloud_pub_;
 
+    std::string keyframe_pose_topic_;
+    std::string keyframe_point_topic_;
+
+    // Keyframe time
+    rclcpp::Time last_keyframe_time_;
+
     //------------------------------------------
     // IMU support (not yet implemented, skeleton only)
     //------------------------------------------
@@ -262,25 +266,25 @@ private:    // private class variables
     int tf_retry_count_{0};
     int tf_max_retries_{50};
 
-    // ---------------------
-    // Diagnostic publishers for rViz2
-    // ---------------------
-
-    // aligned point cloud publisher
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_cloud_pub_;
-
-    // path publisher
-    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
-    nav_msgs::msg::Path path_msg_;
-
-    // Keyframe time
-    rclcpp::Time last_keyframe_time_;
-
     // watchdog
     rclcpp::Time last_msg_time_;
     long watchdog_timeout_;
     rclcpp::TimerBase::SharedPtr watchdog_timer_;
     bool shutdown_triggered_{false};
 
+    // ---------------------
+    // Diagnostic publishers for rViz2
+    // ---------------------
+
+    // aligned point cloud publisher
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr aligned_cloud_pub_;
+    std::string aligned_scan_topic_;
+
+    // path publisher
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+    nav_msgs::msg::Path path_msg_;
+    std::string path_topic_;
+
+    // diagnostic variables
     int64_t NumberOfScans_ {0};
 };
