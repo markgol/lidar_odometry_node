@@ -39,6 +39,7 @@
 //                          so that code is easier to follow.
 //      V0.5.0  2026-04-06  Added keyframe publshing for SLAM
 //                          Get topic names for publishing from config file
+//      V0.5.1  2026-04-25  Added config parameter for odom topic
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -184,6 +185,8 @@ private:    // private class variables
     Eigen::Matrix4f deltaTransform_ = Eigen::Matrix4f::Identity();// change in pose since last scan use as guess
 
     std::string odometry_frame_id_; // odometry frame ID
+    std::string odom_topic_; // odometry topic
+
     std::string robot_frame_id_; // robot frame ID
 
     // ---------------------

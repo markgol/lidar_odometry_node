@@ -429,7 +429,7 @@ bool lidar_odometry_node::shouldCreateKeyframe(const Eigen::Matrix4f& current_po
 
     // --- KEY LOGIC ---
 
-    double dynamic_thresh = avgDistance_ + 2.0 * sqrt(sigmaDistance_);
+    double dynamic_thresh = avgDistance_ + 3.0 * sqrt(sigmaDistance_);
     dynamic_thresh = std::min(dynamic_thresh, keyframe_translation_thresh_);
     auto now = this->get_clock()->now();
 

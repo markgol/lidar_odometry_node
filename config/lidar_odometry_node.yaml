@@ -6,22 +6,22 @@ lidar_odometry_node:
   correspondence: 1.0
   epsilon: 1.0e-6
   local_submap_distance: 4.0
-  max_noiseDistance: 0.03
-  max_imu_queue: 540
   EnableCropDistance: true
   fitness_score: 0.3
+  max_noiseDistance: 0.03
   icp_iterations: 25
   max_scan_queue: 45
   scan_trim_size: 30
   odometry_frame_id: odom
   odom_topic: /odom
-  keyframe_pose_topic: /lidar/keyframes/pose
-  keyframe_point_topic: /lidar/keyframes/cloud
   robot_frame_id: base_link
   watchdog_timeout: 60
   keyframe_translation_thresh: 0.5
   keyframe_rotation_thresh: 0.3
   keyframe_min_translation_for_rotation: 0.1
   keyframe_last_frame_time: 2.0
-  path_topic: /path
+  keyframe_pose_topic: /lidar/keyframes/pose
+  keyframe_point_topic: /lidar/keyframes/cloud
   aligned_scan_topic: /aligned_scan
+  path_topic: /path
+  max_imu_queue: 540

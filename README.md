@@ -316,15 +316,13 @@ This node is intended to work with:
 Future Work
 -----------
 
-* Multi-sensor fusion (e.g., wheel odometry, vision)
-
 * Loop closure integration
 
 * Pose graph optimization
 
 * map → odom correction
 
-* 
+* Multi-sensor fusion (e.g., wheel odometry, vision)
 
 * * *
 

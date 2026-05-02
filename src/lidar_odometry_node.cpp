@@ -135,6 +135,7 @@
 //                          Added detection of "/imu/data" topic (from l2lidar_node)
 //                          Currently this node does not process the L2 IMU data but the
 //                          skeletal framwork is in place.
+//      V0.5.1  2026-04-25  Added config parameter for odom topic
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -198,16 +199,16 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<double>("correspondence", 1.0); // meters
     declare_parameter<double>("epsilon", 1.0e-6);
     declare_parameter<double>("local_submap_distance", 4.0);   // meters
-    declare_parameter<bool>("EnableCropDistance", false);
+    declare_parameter<bool>("EnableCropDistance", true);
     declare_parameter<double>("fitness_score", 0.3); // LSQ fit mean squared distance in meters
     declare_parameter<double>("max_noiseDistance", 0.03); // distance in meters
     declare_parameter<int>("icp_iterations", 25); // 20-50
     declare_parameter<int>("max_scan_queue", 45); // 20-50
-    declare_parameter<int>("max_imu_queue", 500); // 270-1000
     declare_parameter<int>("scan_trim_size", 30); // 20-50
     declare_parameter<std::string>("odometry_frame_id", "odom");
+    declare_parameter<std::string>("odom_topic", "odom");
     declare_parameter<std::string>("robot_frame_id", "base_link");
-    declare_parameter<long>("watchdog_timeout", 40);
+    declare_parameter<long>("watchdog_timeout", 60);
     declare_parameter<double>("keyframe_translation_thresh", 0.5); //0.4-0.7m
     declare_parameter<double>("keyframe_rotation_thresh", 0.3); // radians (~17 degrees)
     declare_parameter<double>("keyframe_min_translation_for_rotation", 0.1); // 0.1m
@@ -216,6 +217,7 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<std::string>("keyframe_point_topic", "/lidar/keyframes/cloud");
     declare_parameter<std::string>("aligned_scan_topic", "/aligned_scan");
     declare_parameter<std::string>("path_topic", "/path");
+    declare_parameter<int>("max_imu_queue", 500); // 270-1000
 
     // Number of static position scans to acquire for the initial local map
     // before processing starts
@@ -239,6 +241,7 @@ lidar_odometry_node::lidar_odometry_node()
     get_parameter("max_imu_queue", max_imu_queue_);
     get_parameter("scan_trim_size", scan_trim_size_);
     get_parameter("odometry_frame_id", odometry_frame_id_);
+    get_parameter("odom_topic", odom_topic_);
     get_parameter("robot_frame_id", robot_frame_id_);
 
     // Keyframe parameters
@@ -283,8 +286,8 @@ lidar_odometry_node::lidar_odometry_node()
         }
     }
 
-    // create new publisher /odom
-    odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10); // queue size = 10
+    // create new publisher odom_topic_
+    odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10); // queue size = 10
 
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
@@ -458,10 +461,10 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     if(EnableCropDistance_) {
         submap = CropDistance(local_map_, local_submap_distance_);
         subscan = CropDistance(base_link_scan_, local_submap_distance_);
-        auto end = std::chrono::steady_clock::now();
-        msec = std::chrono::duration<double, std::milli>(end-start).count();
+        // auto end = std::chrono::steady_clock::now();
+        // msec = std::chrono::duration<double, std::milli>(end-start).count();
 
-        RCLCPP_INFO(get_logger(), "Crop time: %.1f ms", msec);
+        // RCLCPP_INFO(get_logger(), "Crop time: %.1f ms", msec);
     }
 
     // Make intial guess for scan position
@@ -495,17 +498,20 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
                 avgDistance_,
                 sqrt(sigmaDistance_));
 
-    // use 2 std dev above mean translation delta as limit
+    // use 3 std dev above mean translation delta as limit
     double noise_limit;
-    noise_limit = avgDistance_+(2.0*sqrt(sigmaDistance_));
+    noise_limit = avgDistance_+(3.0*sqrt(sigmaDistance_));
 
     // make a guess
     noise_limit = std::min(noise_limit,max_noiseDistance_);
 
     Eigen::Matrix4f quess;
     if(distance > noise_limit) {
-        // robot likely changed position
+        // robot likely changed position so make
+        // a guess that it is moving in the same direction
+        // as the last pose movement
         quess = deltaTransform_;
+        RCLCPP_INFO(get_logger(), "Guess made: %.4f m", distance);
     } else {
         // no siginficant change in robot position
         quess = Eigen::Matrix4f::Identity();
