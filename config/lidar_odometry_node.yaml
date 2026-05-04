@@ -1,14 +1,13 @@
 lidar_odometry_node:
  ros__parameters:
   init_scans: 20
-  local_map_max_size: 400000
   voxel_leaf: 0.03
   correspondence: 1.0
   epsilon: 1.0e-6
   local_submap_distance: 4.0
   EnableCropDistance: true
   fitness_score: 0.3
-  max_noiseDistance: 0.03
+  max_noiseDistance: 0.005
   icp_iterations: 25
   max_scan_queue: 45
   scan_trim_size: 30
@@ -25,3 +24,12 @@ lidar_odometry_node:
   aligned_scan_topic: /aligned_scan
   path_topic: /path
   max_imu_queue: 540
+  max_submaps: 8
+  submap_max_points: 400000
+  submap_radius: 4.0
+  max_selected_submaps: 3
+  submap_dist_thresh: 0.5
+  submap_yaw_thresh:  0.174532925
+  max_predict_dist: 1.5
+  max_rotation_step: 0.785398163
+

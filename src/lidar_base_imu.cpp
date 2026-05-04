@@ -59,6 +59,9 @@
 //                          to typical ROS2 topics and IDs
 //                          Refactored to use more helper methods for publishing
 //                          so that code is easier to follow.
+//      V0.6.0  2026-05-04  Currently IMU data is not being used but next version
+//                          is planned to use IMU data to help confirm stationary
+//                          platform state.
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -97,72 +100,3 @@ void lidar_odometry_node::imuCallback(
         }
     }
 }
-
-//--------------------------------------------------------
-//  integrateImuRotation
-//  *** This is just an example and is not actually being used ***
-//
-//  This integrates a queue of IMU packets
-//  This will likely never get used in its current form
-//  It is being kept as examples of some usefull conversion
-//  syntax and transform examples.
-//
-//  Note:
-//--------------------------------------------------------
-Eigen::Matrix3f lidar_odometry_node::integrateImuRotation()
-{
-    if (imu_queue_.size() < 2)
-        return Eigen::Matrix3f::Identity();
-
-    Eigen::Matrix3f R_total = Eigen::Matrix3f::Identity();
-
-    for (size_t i = 1; i < imu_queue_.size(); ++i)
-    {
-        const auto &imu_prev = imu_queue_[i-1];
-        const auto &imu_curr = imu_queue_[i];
-
-        // Compute dt in seconds using nanoseconds
-        long long curr_nsec =
-            (long long)imu_curr->header.stamp.sec * 1000000000LL +
-            imu_curr->header.stamp.nanosec;
-
-        long long prev_nsec =
-            (long long)imu_prev->header.stamp.sec * 1000000000LL +
-            imu_prev->header.stamp.nanosec;
-
-        double dt = (curr_nsec - prev_nsec) * 1e-9;
-
-        if (dt <= 0.0 || dt > 0.05)
-            continue;
-
-        // Angular velocity in IMU frame (rad/sec)
-        Eigen::Vector3f omega_imu(imu_curr->angular_velocity.x,
-                                  imu_curr->angular_velocity.y,
-                                  imu_curr->angular_velocity.z);
-
-        // convert to base_link frame
-        Eigen::Vector3f omega_base = R_base_imu_ * omega_imu;
-
-        // delta time correction
-        Eigen::Vector3f theta = omega_base * dt;
-
-        float angle = theta.norm();
-
-        Eigen::Matrix3f R_delta = Eigen::Matrix3f::Identity();
-
-        if (angle > 1e-8f)
-        {
-            Eigen::Vector3f axis = theta.normalized();
-            R_delta = Eigen::AngleAxisf(angle, axis).toRotationMatrix();
-        }
-
-        // Accumulate total rotation
-        R_total =  R_delta * R_total;
-    }
-
-    // Clear queue after integration
-    imu_queue_.clear();
-
-    return R_total;
-}
-

@@ -40,6 +40,11 @@
 //      V0.5.0  2026-04-06  Added keyframe publshing for SLAM
 //                          Get topic names for publishing from config file
 //      V0.5.1  2026-04-25  Added config parameter for odom topic
+//      V0.6.0  2026-04-28  Changed local map to be initial established anchor map then
+//                          create queue of immutable submaps created from new position keyframes
+//                          use immutable map from the 'n' closest immutable maps for ICP matching.
+//                          Added isStationary state.  This is to reduce drift due to noise when
+//                          the robot is not moving.
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -133,6 +138,11 @@ private:    // private class methods
         const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud,
         double Distance);
 
+    // ICP helper functions
+    pcl::PointCloud<pcl::PointXYZI>::Ptr buildICPTarget();
+    bool shouldCloseSubmap();
+    void ClampDelta(Eigen::Matrix4f& delta);
+
     // publisher for Keyframes
     void publishKeyframe(
         const Eigen::Matrix4f& pose,
@@ -167,9 +177,6 @@ private:    // private class variables
     // ICP for matching odom_scan_ against lcoal_map_ (odom frame)
     pcl::IterativeClosestPoint<pcl::PointXYZI, pcl::PointXYZI> icp;
 
-    // sliding map buffer (base_link frame)
-    std::deque<pcl::PointCloud<pcl::PointXYZI>::Ptr> scan_queue_;
-
     // ---------------------
     // Pose tracking
     // ---------------------
@@ -193,17 +200,50 @@ private:    // private class variables
     // Initial map accumulation, only used during the initial map accumulation phase
     // ---------------------
     int init_scans_{25};    // number of scans in initial map (config param)
-    int local_map_max_size_; // size of local_map that triggers resize (config param)
     int init_scans_total {0};   // number of scans currently in the initial map accumulation
     bool map_initialized_ {false};  // initial local map accumulation completed
 
-    // ---------------------
-    // sliding map trimming instructions
-    // ---------------------
-    float local_map_radius_ = 5.0f; // meters (config param)
-    int max_scan_queue_ = 45;   // max # scans to keep in queue  (config param)
-    int scan_trim_size_ = 30;   // when max scan in queue is reached reduce
-                                // to scan_trim_size_ by deleting the oldest scans (config param)
+    // ************************************************************
+    // V0.6.0 changes, maps, poses, config params
+    //
+
+    // --- Submap structure ---
+    struct Submap {
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cloud;
+        Eigen::Vector3f center;
+    };
+
+    // --- Members ---
+    pcl::PointCloud<pcl::PointXYZI>::Ptr anchor_submap_;
+    bool anchor_ready_ = false;
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr active_submap_;
+    std::deque<Submap> submaps_;
+
+    // ------------------------------------------------------------
+    // V0.6.0 new config parameters
+    //
+
+    // submap config
+    int max_submaps_ {8};
+    double submap_radius_ {10.0};     // meters
+    int max_selected_submaps_ {3};
+
+    // thresholds for closing submap
+    double submap_dist_thresh_ {3.0};     // meters
+    double submap_yaw_thresh_  {10.0 * M_PI / 180.0};
+
+    double max_predict_dist_ {1.5};
+    double max_rotation_step_ {45.0 * M_PI / 180.0};
+
+    int submap_max_points_ {400000};
+
+    // ------------------------------------------------------------
+
+    // track last submap pose
+    Eigen::Matrix4f last_submap_pose_ = Eigen::Matrix4f::Identity();
+
+    // ************************************************************
 
     // ---------------------
     // ICP parameters

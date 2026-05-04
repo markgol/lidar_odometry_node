@@ -1,328 +1,323 @@
-### Updated 2025-04-15 V0.5.0
+### Updated 2025-05-04 V0.6.0
 
 lidar_odometry_node
 ===================
 
+This represents a major architectrual change from V0.5.1.  This just initial README.md which needs  updatin to be complete.
+
 Overview
---------
+===================
 
-`lidar_odometry_node` is a ROS2 node that performs **real-time LiDAR-based odometry** using an ICP (Iterative Closest Point) scan-to-submap alignment approach.
+`lidar_odometry_node` performs real-time LiDAR-based odometry using ICP alignment against a **locally constructed map representation**. The system is designed for robustness on ground-based robots operating in uneven terrain, without relying on IMU-based pose correction.
 
-The node estimates the robot's motion incrementally by aligning incoming LiDAR scans to a **sliding local map**, producing a continuous odometry estimate in the `odom` frame.
+The node produces:
 
-This node is designed as the **front-end odometry component** of a larger SLAM system and publishes **keyframes** for downstream processing by a pose graph SLAM node.
+* `odom → base_link` transform
 
-* * *
+* Odometry messages
 
-Key Features
-------------
-
-* ICP-based scan-to-submap alignment
-
-* Sliding local map for stable real-time performance
-
-* Adaptive noise-aware motion estimation
-
-* Optional distance-based cropping for ICP acceleration
-
-* Keyframe extraction with adaptive thresholds
-
-* ROS2-native publishers, subscribers, and TF integration
+* Keyframes for downstream SLAM (e.g., pose graph backend)
 
 * * *
 
-System Assumptions
-------------------
-
-This node assumes the following about the incoming data:
-
-* LiDAR provides **full 360° field-of-view 3D point cloud**
-
-* Point clouds are: **pose corrected using IMU quaternion**  (in the L2lidar_node)
-
-* Input clouds are effectively aligned with the `base_link` frame
-
-* * *
-
-Node Responsibilities
+Key Design Principles
 ---------------------
 
-### Subscribes to
+### 1. Absolute Pose Estimation (Not Incremental Drift Integration)
 
-* `/points` (`sensor_msgs/msg/PointCloud2`)  
-  LiDAR point cloud data
+ICP is used as an **absolute pose estimator** relative to a local map (anchor + submaps), not as a pure frame-to-frame motion estimator.
 
-* `/imu` (`sensor_msgs/msg/Imu`)  
-  IMU data (optional for future use)
+This avoids long-term drift accumulation typical of incremental odometry pipelines.
 
 * * *
 
-### Publishes
+### 2. Anchor + Submap Architecture
 
-Topic names are input from the config yaml file.  These are the default names.
+#### Anchor Submap
 
-* `/odom` (`nav_msgs/msg/Odometry`)  
-  Incremental odometry estimate
+* Built once at startup while the robot is stationary
 
-* `/aligned_scan` (`sensor_msgs/msg/PointCloud2`)  
-  ICP-aligned scan (diagnostic)
+* Immutable
 
-* `/path` (`nav_msgs/msg/Path`)  
-  Odometry path (diagnostic)
+* Provides a **stable global reference**
 
-* `/lidar/keyframes/pose` (`geometry_msgs/msg/PoseStamped`)  
-  Extracted keyframe poses
+* Prevents long-term drift
 
-* `/lidar/keyframes/cloud` (`sensor_msgs/msg/PointCloud2`)  
-  Extracted keyframe point clouds (full scans)
+#### Active Submap
+
+* Accumulates recent aligned scans
+
+* Represents current local geometry
+
+* Periodically closed and converted into a frozen submap
+
+#### Frozen Submaps
+
+* Stored in a bounded queue
+
+* Provide additional spatial constraints during motion
+
+* Improve ICP robustness during revisits or low-feature regions
 
 * * *
 
-### TF Frames
+### 3. ICP Target Construction
 
-The node publishes:
-    odom → base_link
+Each ICP iteration aligns the incoming scan against a target composed of:
 
-Expected TF tree:
-    map → odom → base_link → lidar
+* Anchor submap (always or conditionally included)
+
+* Nearby frozen submaps
+
+* Optionally the active submap
+
+This ensures:
+
+* Strong constraints near origin
+
+* Good local alignment during motion
+
+* Reduced degeneracy compared to a sliding window map
+
+* * *
+
+### 4. Motion Model (Prediction)
+
+A constant-velocity SE(3) motion model is used:
+    T_pred = T_last * ΔT_previous
+
+This improves:
+
+* ICP convergence speed
+
+* Stability under sparse geometry
+
+* Rotation estimation
+
+* * *
+
+### 5. Stationary Detection and Motion Suppression
+
+ICP becomes underconstrained when the robot is stationary. To prevent drift:
+
+#### Detection
+
+Based on **measured motion statistics**:
+
+* Mean translation
+
+* Standard deviation
+
+* (optionally) rotation magnitude
+
+#### Handling
+
+* Motion is **suppressed (not integrated)** when stationary
+
+* ICP still runs for alignment, but its motion output is ignored
+
+Key concept:
+
+> Measured motion is preserved, but applied motion is filtered.
+
+* * *
+
+### 6. Separation of Motion Signals
+
+Two motion representations are maintained:
+
+* `deltaMeasured_`: raw motion from ICP (always updated)
+
+* `deltaApplied_`: filtered motion used for state updates
+
+This ensures:
+
+* Reliable stationary detection
+
+* Immediate response when motion resumes
+
+* * *
+
+### 7. Motion Clamping (Stability Control)
+
+To prevent instability from ICP outliers:
+
+* Translation is bounded per frame
+
+* Rotation is bounded per frame
+
+Clamping is applied **before updating the pose state**
+
+* * *
+
+### 8. Submap Management
+
+Submaps are closed using multiple criteria:
+
+* Pose change (translation or rotation)
+
+* Maximum size threshold
+
+* Stationary overflow protection
+
+During stationary periods:
+
+* Active submap growth is suppressed
 
 * * *
 
 Processing Pipeline
 -------------------
 
-    Incoming Scan (/points)
-            ↓
-    Voxel Downsampling
-            ↓
-    Transform to base_link
-            ↓
-    (Optional) Crop for ICP
-            ↓
-    ICP Alignment (scan → local map)
-            ↓
-    Update Odometry (T_odom_base)
-            ↓
-    Update Local Map (sliding window)
-            ↓
-    Keyframe Extraction (full scan)
-            ↓
-    Publish outputs
+### 1. Input
+
+* `sensor_msgs::PointCloud2` from LiDAR
+
+* Transform: `lidar → base_link`
 
 * * *
 
-Keyframe Extraction
--------------------
+### 2. Initialization Phase
 
-Keyframes are generated to support downstream SLAM (e.g., pose graph optimization).
+* Accumulate scans while stationary
 
-### Key Properties
+* Build anchor submap
 
-* Keyframes use the **full aligned scan**, not cropped data
-
-* ICP results are applied to the full scan before storage
-
-* Keyframes are published in the `odom` frame
+* Initialize transforms to identity
 
 * * *
 
-### Keyframe Criteria
+### 3. Per-Scan Processing
 
-Keyframes are generated using:
+1. Transform scan → `base_link`
 
-* **Primary trigger:** translation threshold ( large distance move)
+2. Predict pose using motion model
 
-* **Secondary trigger:** rotation gated by minimum translation (small distance move)
+3. Build ICP target (anchor + submaps)
 
-* **Adaptive thresholding:** based on motion noise statistics
+4. Run ICP alignment
 
-This avoids false positives caused by:
+5. Compute measured motion (`deltaMeasured_`)
 
-* IMU noise (IMU is currently not used here but noise can effect pose in the l2lidar_node)
+6. Detect stationary condition
 
-* small ICP corrections
+7. Apply motion filtering → `deltaApplied_`
 
-* stationary jitter
+8. Clamp motion (translation + rotation)
 
-* * *
+9. Update pose (`T_odom_base_`)
 
-Parameters
-----------
+10. Accumulate into active submap (if moving)
 
-### ICP parameters
+11. Close submap if needed
 
-| Parameter         | Type   | Description                                         | default value |
-| ----------------- | ------ | --------------------------------------------------- | ------------- |
-| `voxel_leaf`      | double | Downsampling leaf size                              | 0.03          |
-| `correspondence`  | double | ICP correspondence distance                         | 1.0           |
-| `epsilon`         | double | ICP convergence threshold                           | 1.0e-6        |
-| fitness_score     | double | ICP fitness threshold                               | 0.3           |
-| icp_iterations    | int    | Max. number ICP iterations                          | 25            |
-| max_noiseDistance | double | Max noise threshold for motion estimation in meters | 0.03          |
+12. Publish:
+* Transform
 
-* * *
+* Odometry
 
-### Map parameters
+* Path
 
-| Parameter               | Type   | Description                                                                               | default value |
-| ----------------------- | ------ | ----------------------------------------------------------------------------------------- | ------------- |
-| init_scans              | int    | Number of scan in initial map                                                             | 20            |
-| `local_map_max_size`    | int    | Maximum number of points in local map                                                     | 400000        |
-| `scan_trim_size`        | int    | max number of last scans to use to reset the local map when it exceeds the local map size | 30            |
-| `local_submap_distance` | double | Crop radius in meters  (if enabled)                                                       | 4.0           |
-| EnableCropDistance      | bool   | Enable crop of local map                                                                  | true          |
-| max_scan_queue          | int    | max scan queue size                                                                       | 45            |
+* Keyframes
 
 * * *
 
-### Keyframe parameters
+Frames
+------
 
-| Parameter                               | Type   | Description                                       | default value |
-| --------------------------------------- | ------ | ------------------------------------------------- | ------------- |
-| `keyframe_translation_thresh`           | double | Translation threshold (meters)                    | 0.5           |
-| `keyframe_rotation_thresh`              | double | Rotation threshold (radians)                      | 0.3           |
-| `keyframe_min_translation_for_rotation` | double | Minimum translation required to consider rotation | 0.1           |
-| keyframe_last_frame_time                | double | minimum keyframe publish rate in seconds          | 2.0           |
+* `odom`: Local reference frame (drift-limited)
 
-* * *
+* `base_link`: Robot frame
 
-### Topic and frame parameters
-
-| Parameter            | Type   | Description                               | default value          |
-| -------------------- | ------ | ----------------------------------------- | ---------------------- |
-| robot_frame_id       | string | robot frame                               | base_link              |
-| odometry_frame_id    | string | odometry frame                            | odom                   |
-| odom_topic           | string | odometry topic                            | /odom                  |
-| keyframe_pose_topic  | string | keyframe robot pose topic                 | /lidar/keyframes/pose  |
-| keyframe_point_topic | string | keyframe point cloud topic                | /lidar/keyframes/cloud |
-| path_topic           | string | diagnostic local robot path topic         | /path                  |
-| aligned_scan_topic   | string | diagnostic aligned scan point cloud topic | /aligned_scan          |
-
-***
-
-### Other parameters
-
-| Parameter        | Type | Description                                                           | default value |
-| ---------------- | ---- | --------------------------------------------------------------------- | ------------- |
-| watchdog_timeout | int  | node stops if no subcription data received for this number of seconds | 60            |
-|                  |      |                                                                       |               |
-| max_imu_queue    | int  | FIFO queue of IMU packets (only if enabled)                           | 540           |
+* `lidar`: Sensor frame (static transform)
 
 * * *
 
-Local Map Behavior
-------------------
-
-* Maintains a **sliding window of recent scans**
-
-* Limits computational cost of ICP
-
-* Periodically trims and rebuilds based on scan queue
-
-* Optionally cropped by distance for ICP matching to improve performance (only the local map is cropped, keyframes are without cropping)
-
-* * *
-
-Important Design Notes
-----------------------
-
-### 1. Cropped vs Full Scans
-
-* **Cropped scans** are used ONLY for ICP input
-
-* **Full scans** are used for:
-  
-  * keyframes
-  
-  * future SLAM processing
-
-This separation ensures:
-
-* fast alignment
-
-* robust loop closure later
-
-* * *
-
-### 2. Odometry Frame
-
-* All outputs are in the `odom` frame
-
-* This frame is **locally consistent but drifts over time**
-
-* Global correction will be handled by the SLAM node
-
-* * *
-
-### 3. Adaptive Motion Filtering
-
-The node computes:
-
-* mean translation (`avgDistance_`)
-
-* variance (`sigmaDistance_`)
-
-These are used to:
-
-* suppress noise
-
-* improve motion estimation
-
-* support adaptive keyframe selection
-
-* * *
-
-Diagnostics
+Assumptions
 -----------
 
-The node provides:
+* Robot starts stationary long enough to build anchor map
 
-* `/aligned_scan` for ICP visualization
+* Ground-based platform
 
-* `/path` for trajectory inspection
+* Roll/pitch may vary (terrain), yaw unconstrained
 
-* console logs for:
-  
-  * ICP timing
-  
-  * fitness score
-  
-  * noise statistics
+* No reliance on IMU for pose correction
+
+* * *
+
+Advantages
+----------
+
+* Resistant to long-term drift
+
+* Robust to IMU noise or failure
+
+* Handles stationary degeneracy explicitly
+
+* Supports rotation-in-place (tracked robots)
+
+* Stable ICP convergence via motion prediction
 
 * * *
 
 Limitations
 -----------
 
-* No loop closure
+* Requires good initial stationary scan set
 
-* No global map
+* ICP degeneracy still possible in extremely sparse environments
 
-* Drift accumulates over time
-
-* * *
-
-Integration
------------
-
-This node is intended to work with:
-
-* `pose_graph_slam_node` (for global optimization)
-
-* `global_map_builder_node` (for map construction)
+* No global consistency without external SLAM backend
 
 * * *
 
-Future Work
------------
+Integration with SLAM
+---------------------
 
-* Loop closure integration
+This node provides **high-quality local odometry** for:
 
-* Pose graph optimization
+* Pose graph SLAM
 
-* map → odom correction
+* Loop closure systems
 
-* Multi-sensor fusion (e.g., wheel odometry, vision)
+* Map optimization (e.g., Ceres-based backends)
+
+It does not perform:
+
+* Loop closure
+
+* Global map optimization
+
+* * *
+
+Future Improvements
+-------------------
+
+* Yaw-specific damping (preserve roll/pitch freedom)
+
+* Inclusion of IMU data in stationary determinination
+
+* Adaptive target selection radius (only if needed to reduce compuation time)
+
+* Integration of wheel odometry (optional)
+
+* * *
+
+Summary
+-------
+
+This implementation transitions from a traditional sliding-map ICP approach to a **structured, stability-focused odometry system**:
+
+* Anchor map for long-term stability
+
+* Submaps for local consistency
+
+* Absolute pose estimation via ICP
+
+* Explicit handling of stationary degeneracy
+
+The result is significantly improved robustness over long durations, especially in environments where IMU data is unreliable.
 
 * * *
 
@@ -359,3 +354,7 @@ This node is designed for **modular SLAM system integration**, emphasizing:
 ## Version
 
 V0.5.0    2026-04-15    This is the initial public release.  It is operable but has not been fully tested.  It has further development that is being done.  This initial release is part of the projects larger over-all skeleton for SLAM operation.  It explcitily does not use IMU or other odometry sensors. It relies purely on ICP SE(3) matching to determine odometry.  It has additional noise filtering to detect when the platform is not moving.  This was done to reduce drift accumulation when the platform isn't moving.  It also has a radius crop of the local map in order to reduce processing requirements.  The node assumes that the plaform is stationary when it first starts.  This allows the node to create a local map of the platform's location.
+
+
+
+V0.6.0    2026-05-04    This is major architectural change thats uses immutable submaps for ICP matching along with detection for stationary state.  This is to reduce the degeneracy when the platform is not moving and noise results in drift.

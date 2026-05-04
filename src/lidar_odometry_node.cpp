@@ -29,33 +29,8 @@
 //          src/odom_TFs_publishers.cpp
 //
 //		Target:	Ubuntu 24.04 systems with ROS2 Jazzy installed
-//		Initial target hardware is RPI5 (ARM64) and an x86_64
+//		Initial target hardware is RPI5 (ARM64) and x86_64
 //
-//      ICP processing pipeline
-//
-//        PointCloud2 (/points
-//            │
-//        convert to pcl
-//            │
-//        voxel filter
-//            │
-//        initial local map accumulation (skipped once completed)
-//            │
-//        crop local submap (does not use  pcl::CropBox)
-//            │
-//        ICP align
-//            │
-//       convergence/fitness validation
-//            │
-//        pose update
-//            │
-//        local map update (when map reaches max size, trim using size scan queue)
-//            │
-//        publish odometry
-//            │
-//        publish TFs
-//            |
-//        publish diagnostics
 //
 //      TRANSFORM TREE
 //
@@ -136,6 +111,11 @@
 //                          Currently this node does not process the L2 IMU data but the
 //                          skeletal framwork is in place.
 //      V0.5.1  2026-04-25  Added config parameter for odom topic
+//      V0.6.0  2026-04-28  Changed local map to be initial established anchor map then
+//                          create queue of immutable submaps created from new position keyframes
+//                          use immutable map from the 'n' closest immutable maps for ICP matching.
+//                          Added isStationary state.  This is to reduce drift due to noise when
+//                          the robot is not moving.
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -193,7 +173,6 @@ lidar_odometry_node::lidar_odometry_node()
 {
     // parameters from yaml configuration file
     declare_parameter<int>("init_scans", 20);
-    declare_parameter<int>("local_map_max_size", 400000);
 
     declare_parameter<double>("voxel_leaf", 0.03); // 0.02 to 0.05
     declare_parameter<double>("correspondence", 1.0); // meters
@@ -201,7 +180,7 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<double>("local_submap_distance", 4.0);   // meters
     declare_parameter<bool>("EnableCropDistance", true);
     declare_parameter<double>("fitness_score", 0.3); // LSQ fit mean squared distance in meters
-    declare_parameter<double>("max_noiseDistance", 0.03); // distance in meters
+    declare_parameter<double>("max_noiseDistance", 0.005); // distance in meters
     declare_parameter<int>("icp_iterations", 25); // 20-50
     declare_parameter<int>("max_scan_queue", 45); // 20-50
     declare_parameter<int>("scan_trim_size", 30); // 20-50
@@ -218,13 +197,29 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<std::string>("aligned_scan_topic", "/aligned_scan");
     declare_parameter<std::string>("path_topic", "/path");
     declare_parameter<int>("max_imu_queue", 500); // 270-1000
+    // V0.6.0 new configuration parameters
+    declare_parameter<int>("max_submaps", 8); // 5-20
+    declare_parameter<double>("submap_radius", 4.0); // distance in meters, 4.0 inside, 10.0 outside
+    declare_parameter<int>("max_selected_submaps", 3); // 3-5
+    declare_parameter<double>("submap_dist_thresh", 0.5); // distance in meters
+    declare_parameter<double>("submap_yaw_thresh", 10.0 * M_PI / 180.0); // yaw rotation threshold (10 degrees)
+    declare_parameter<double>("max_predict_dist", 1.5); // distance in meters
+    declare_parameter<double>("max_rotation_step", 45.0 * M_PI / 180.0); // max yaw rotation (45 degrees)
+    declare_parameter<int>("submap_max_points", 400000); // max yaw rotation (45 degrees)
 
     // Number of static position scans to acquire for the initial local map
     // before processing starts
     get_parameter("init_scans", init_scans_);
 
-    // max size of local map size
-    get_parameter("local_map_max_size", local_map_max_size_);
+    // V0.6.0 new configuration parameters
+    get_parameter("max_submaps", max_submaps_);
+    get_parameter("submap_radius", submap_radius_);
+    get_parameter("max_selected_submaps", max_selected_submaps_);
+    get_parameter("submap_dist_thresh", submap_dist_thresh_);
+    get_parameter("submap_yaw_thresh", submap_yaw_thresh_);
+    get_parameter("max_predict_dist", max_predict_dist_);
+    get_parameter("max_rotation_step", max_rotation_step_);
+    get_parameter("submap_max_points", submap_max_points_);
 
     //voxel downsample size
     get_parameter("voxel_leaf", voxel_leaf_);
@@ -237,9 +232,7 @@ lidar_odometry_node::lidar_odometry_node()
     get_parameter("fitness_score", fitness_score_);
     get_parameter("max_noiseDistance", max_noiseDistance_);    
     get_parameter("icp_iterations", icp_iterations_);
-    get_parameter("max_scan_queue", max_scan_queue_);
     get_parameter("max_imu_queue", max_imu_queue_);
-    get_parameter("scan_trim_size", scan_trim_size_);
     get_parameter("odometry_frame_id", odometry_frame_id_);
     get_parameter("odom_topic", odom_topic_);
     get_parameter("robot_frame_id", robot_frame_id_);
@@ -258,9 +251,6 @@ lidar_odometry_node::lidar_odometry_node()
     // --------- debug publishers ---------------------
     get_parameter("aligned_scan_topic", aligned_scan_topic_);
     get_parameter("path_topic", path_topic_);
-
-    // init scan_queue_ to empty
-    scan_queue_.clear();
 
     // subscribe to the l2lidar_node publisher /points
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -302,7 +292,7 @@ lidar_odometry_node::lidar_odometry_node()
     base_link_scan_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 
     // clear the scan queue
-    scan_queue_.clear();
+    // ??? scan_queue_.clear();
 
     // ICP parameters
     icp.setTransformationEpsilon(epsilon_);
@@ -367,105 +357,77 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
 
     //*************************************************************************
     //  Data comes from the L2lidar_node puplisher
-    //  IMPORTANT:  The point cloud scan is pose (rotation) corrected before being
-    //  received.  This is optional in the L2lidar_node.
-    //  If it is applied then only translation position correction is required
-    //  If it s not applied that both rotation annd translation will need to be estimated
+    //  IMPORTANT:  The point cloud scan should NOT BE POSE(ROTATION) CORRECTED
+    //  before being received.  This is optional in the L2lidar_node.  It should
+    //  be set to false.
     //*************************************************************************
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr scan(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::fromROSMsg(*msg, *scan);
-    // scan is in the l2lidar_frame, it will need to be translated into the local
-    // map reference frame odom
+    // scan is in the l2lidar_frame, it will need to be translated into the correct
+    // frame reference
     // Note: odom is initially set to t_base_lidar_
     //
-    // The odom frame is only different from the T_base_lidar frame when there is
-    // movement in the robot.
-    //
-    // Since the odom frame utilizes a sliding local map if the robot stops moving
-    // odom frame will become the same as the base_link frame after 'n' scans
-    // With movement the odom frame will lag the base_link frame.
-    //
-    // A map frame relative to the staring position of the robot is needed to
-    // accurately portray the actual robot pose and path.  The current path in the
-    // map frame needs to be adjusted by the delta of the new scan to the position
-    // returned by the last scan (deltaTransform)
-    //
-
-    // downsample scan to filtered_scan_
-    //filtered_scan_ = scan; // This line is only used for diagnostics
-                             // and the filtered lines of code commented
-    vg_filtered_.setLeafSize(voxel_leaf_, voxel_leaf_, voxel_leaf_);
-    vg_filtered_.setInputCloud(scan);
-    vg_filtered_.filter(*filtered_scan_); // this is still in l2lidar frame
-
 
     // ---------------------------------------------
-    // Transform filtered_scan_ from l2lidar_frame -> base_link frame
+    // Transform scan from l2lidar_frame -> base_link frame
     //  result is base_link_scan_
     // ---------------------------------------------
-    base_link_scan_ = TFPointCloud(filtered_scan_, T_base_lidar_);
-    // pcl::transformPointCloud(*filtered_scan_,
-    //                          *base_link_scan_,
-    //                          T_base_lidar_); // at start T_odom_lidar  = T_base_lidar
+    base_link_scan_ = TFPointCloud(scan, T_base_lidar_);
 
     // Accumulate frames for the initial local map
     // For the Unitree L2 this should be 20-50 aggregated scans
     // while in static position
     if (!map_initialized_)
     {
-        *local_map_ += *base_link_scan_;
+        *local_map_ += *base_link_scan_; // full scan, not downsampled
 
         init_scans_total++;
 
         if (init_scans_total >= init_scans_)
         {
             map_initialized_ = true;
-            // The initial local map is complete
-            // There are currently there are 5 frame references:
+            // The initial anchor map is complete
+            // There are currently there are 4 frame references:
             //      odom (local space with origin at robot starting point)
             //      base_link (this is the robot origin)
             //      lidar
             //      imu
             //
-            //  At the start the local map is complete these 3 are the
+            //  At the start the anchor map is complete the following are the
             //  same and initially set to identity (since there is no real world reference)
             //      odom -> base   = I
-            //      it changes over time by change in position by robot
             //
             //  The static_tf_ready_ processing ensures:
             //          base->lidar->imu are defined.
-            //  They are fixed and and never change.
+            //          These are fixed and and never change.
             //
             //  When SLAM with preexisting world map is introduced
             //  There will be a map -> odom transform in addition
-            //  to these.
+            //  to these.  This is not the responibility of this node.
+
+            // Freeze anchor
+
+            // anchor_submap is immutable and is in odom reference frame
+            anchor_submap_.reset(new pcl::PointCloud<pcl::PointXYZI>(*local_map_));
+            anchor_ready_ = true;
+
+            // Start active submap
+            active_submap_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+
+            last_submap_pose_ = T_odom_base_;
 
             // This is just diagnostic
-            RCLCPP_INFO(get_logger(), "Initial map created with %ld points",
-                        local_map_->size());
+            RCLCPP_INFO(get_logger(), "Anchor map created with %ld points",
+                        anchor_submap_->size());
         }
-        // We have a complete local_map_ start processing on the next scan.
+        // We have a complete anchor_submap_ start processing on the next scan.
         return;
     }
 
     // only get here after initial local map creation
 
-    // crop local map by distance for robot
-    auto start = std::chrono::steady_clock::now();
-    double msec;
-
-    pcl::PointCloud<pcl::PointXYZI>::Ptr submap;
-    pcl::PointCloud<pcl::PointXYZI>::Ptr subscan;
-
-    if(EnableCropDistance_) {
-        submap = CropDistance(local_map_, local_submap_distance_);
-        subscan = CropDistance(base_link_scan_, local_submap_distance_);
-        // auto end = std::chrono::steady_clock::now();
-        // msec = std::chrono::duration<double, std::milli>(end-start).count();
-
-        // RCLCPP_INFO(get_logger(), "Crop time: %.1f ms", msec);
-    }
+    // V0.6.0 changes
 
     // Make intial guess for scan position
     // Currently this is using the ICP matching process to estimate movement.
@@ -473,17 +435,17 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     // determinination if the robot is stationary.
 
     // This initially is a guess about the translation movement
-    // in x,z,y since the last frame.
-    // Assumption:  incoming is pose rotation corrected already using
-    // imu data in the l2lidar_node.  If this is true DO NOT double apply
-    // rotation.
-    // in the first pass thru deltaTransform  = I
+    // since the last frame.
+
+    // In the first pass thru deltaTransform  = Identity
     // guess = last position plus deltaTransform;
     // This assumes same direction and velocity
 
     // calculate distance to get running stats
     // on the translation component of deltaTransform
-    Eigen::Vector3f dt = deltaTransform_.block<3,1>(0,3);
+    Eigen::Matrix4f deltaMeasured_;  // raw from ICP (never suppressed)
+
+    Eigen::Vector3f dt = deltaMeasured_.block<3,1>(0,3);
     double distance = dt.norm(); // in meters
     // time how long ICP takes to process
 
@@ -491,56 +453,55 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
         distance,
         &avgDistance_, &sigmaDistance_,
         1.0/(5.55*3.0)  // last 3 seconds running stats
-    );
+        );
+
+    // This will need inclusion of platform status in addition
+    // to this calculation
+    bool isStationary;
 
     RCLCPP_INFO(get_logger(),
-                "odom distance noise: mean %.5f  std dev: %.5f",
+                "delta distance noise: mean %.5f  std dev: %.5f",
                 avgDistance_,
                 sqrt(sigmaDistance_));
 
-    // use 3 std dev above mean translation delta as limit
-    double noise_limit;
-    noise_limit = avgDistance_+(3.0*sqrt(sigmaDistance_));
+    Eigen::Matrix4f guess;
 
-    // make a guess
-    noise_limit = std::min(noise_limit,max_noiseDistance_);
+    isStationary = (avgDistance_ < max_noiseDistance_) &&
+                   (sigmaDistance_ < max_noiseDistance_);
 
-    Eigen::Matrix4f quess;
-    if(distance > noise_limit) {
-        // robot likely changed position so make
-        // a guess that it is moving in the same direction
-        // as the last pose movement
-        quess = deltaTransform_;
-        RCLCPP_INFO(get_logger(), "Guess made: %.4f m", distance);
+    if(isStationary) {
+        guess = lastAlignedTF_;
     } else {
-        // no siginficant change in robot position
-        quess = Eigen::Matrix4f::Identity();
+        Eigen::Matrix4f delta_pred = deltaTransform_;
+        ClampDelta(delta_pred);
+        Eigen::Matrix4f guess = lastAlignedTF_ * delta_pred;
     }
     // End of guess section
 
+    auto target = buildICPTarget(); // made up from submaps or anchor submap at minimum
+    if (target->empty()) {
+        *target += *anchor_submap_;
+    }
+
     RCLCPP_INFO(get_logger(),
-                "submap map size: %ld  Scan size: %ld",
-                submap->size(),
+                "target map size: %ld  Scan size: %ld",
+                target->size(),
                 base_link_scan_->size());
 
     // --- ICP ALIGNMENT ---
-    // current scan in base_link frame reference
-    if(EnableCropDistance_) {
-        icp.setInputSource(subscan);
-        icp.setInputTarget(submap); // align to the local_map_ (submap)
-    } else {
-        icp.setInputSource(base_link_scan_);
-        icp.setInputTarget(local_map_); // align to the local_map_ (submap)
-    }
+
+    icp.setInputSource(base_link_scan_);
+    icp.setInputTarget(target);
 
     pcl::PointCloud<pcl::PointXYZI> aligned;
 
     // time how long ICP takes to process
-    start = std::chrono::steady_clock::now();
+    auto start = std::chrono::steady_clock::now();
+    double msec;
 
     // align using current odom pose guess
-    icp.align(aligned,quess); // start from internal starting guess
-                        // guess should be added when better understood
+    icp.align(aligned,guess); // start from internal starting guess
+    // guess should be added when better understood
 
     auto end = std::chrono::steady_clock::now();
     msec = std::chrono::duration<double, std::milli>(end-start).count();
@@ -560,8 +521,9 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     // Note:  the local map is a sparse map in which vertical slices are missing
     // A complete map with no vertical slices missing would take 480 scans.
     // One of the purposes of the ICP align is make a best guess at the solution
-    // not solving it precisely which ould be extremely slow.
+    // not solving it precisely which would be extremely slow.
     // This spareness results in poorer fitness scores at times.
+    // but not significantly poorer
     double current_fitness_score =icp.getFitnessScore();
 
     if (current_fitness_score > fitness_score_)
@@ -575,83 +537,73 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
                 icp.nr_iterations_,
                 current_fitness_score);
 
-    // *** This was just for convenient diagnostics breakpoint ***
-    // if(NumberOfScans_>20) {
-    //     if((NumberOfScans_%100)==0) {
-    //         RCLCPP_INFO(get_logger(),
-    //                 "Number of scans: %ld",
-    //                 NumberOfScans_);
-    //     }
-    // }
-    // *** end of diagnostic section ***
-
     // --- UPDATE POSES ---
-    // The aligned scan is in the base_link frame reference and is already translated
-    // to the best fit within the base_link local_map_ frame.
-    // The T_alignment value is always the absolute transform used
     Eigen::Matrix4f T_alignment = icp.getFinalTransformation(); // transform from ICP
 
-    // Subtract current alignment from previous alignment
-    // This gives the delta movement from the last scan
-    // This could be as part of guess for next ICP align
-    // assuming a constant velocity and direction.
-    // Note: T_alignment and lastAlignedTF_ are TFs referencing alignment transforms within
-    // odom frame. There are abolsute TFs between the aligned frame the odom frame.
-    // They are only referenced to the odom frame.
-    // deltaTransform is a change in position and is not specific to a given frame reference.
-    // It can be used to update a guess and update the map to robot position
-    deltaTransform_ = T_alignment * lastAlignedTF_.inverse(); // change from last frame
-    lastAlignedTF_ = T_alignment; // update last frame to current frame
-    //
-    // Useful transforms for deltaTransform
-    //
-    // This is the chagne in distance from last postion in meters
-    //  Eigen::Vector3f dt = deltaTransform_.block<3,1>(0,3);
-    //  double translation = dt.norm();
-    //
-    // This is the rotation magnitude in radians
-    //  Eigen::Matrix3f R = deltaTransform_.block<3,3>(0,0);
-    //  Eigen::Quaternionf q(R);
-    //  double angle = 2.0 * std::acos(std::abs(q.w()));
-    //
-    // for example:
-    // if(distance<TBD) {
-    //      robot is not likely to have moved.
-    //      Must decide whether or not to update translation
-    //
+    deltaMeasured_ = lastAlignedTF_.inverse() * T_alignment;
 
-    // Odometry
-    // T_base_lidar_ is the relationship between the
-    // (local_map_) frame and the lidar frame
-    // since the local_map_ is a sliding map that moves over time
-    // If the robot becomes stationary then its position
-    // will match the base (robot) position
-    // T_alignment is the aligned scan position in the base_link frame
-    // So it becomes our new scanner position
-    T_base_lidar_ = T_base_lidar_ * T_alignment; // the new robot position
+    if(isStationary) {
+        deltaTransform_ = Eigen::Matrix4f::Identity();
 
-    // current position in the map is integration of the robot incremental
-    // movement from scan to scan
-    // update robot position change in position to update location in map frame
-    T_odom_base_ = T_odom_base_ * deltaTransform_;
+        // Freeze pose
+        T_alignment = lastAlignedTF_;
 
-    // --- UPDATE SCAN QUEUE (sliding map) ---
-    // push the aligned scan into the queue
-    // The scan queue stays time ordered
-    // push this aligned scan into the queue
-    // 'aligned' scan is in the odom frame
-    scan_queue_.push_back(std::make_shared<pcl::PointCloud<pcl::PointXYZI>>(aligned));
+        RCLCPP_WARN(get_logger(), "Stationary: ICP motion suppressed");
+    }  else {
+        // Subtract current alignment from previous alignment
+        // This gives the delta movement from the last scan
+        // This is used for of guess to be used in next ICP align
+        // assuming a constant velocity and direction.
 
-    // keep queue size constant
-    // The front of the queue is the oldest scan frame
-    // so remove it
-    while(scan_queue_.size()> max_scan_queue_) {
-        scan_queue_.pop_front();
+        // Note: T_alignment and lastAlignedTF_ are TFs referencing alignment transforms within
+        // reference frame of the target map.
+        // deltaTransform is a change in position and is not specific to a given frame reference.
+        // It can be used to update a guess and update the map to robot position
+        Eigen::Matrix4f delta = lastAlignedTF_.inverse() * T_alignment;
+
+        // Clamp delta
+        ClampDelta(delta);
+
+        // recompute corrected alignment
+        T_alignment = lastAlignedTF_ * delta;
+
+        // update state
+        deltaTransform_ = delta;
+        lastAlignedTF_  = T_alignment;
     }
 
-    // --- UPDATE LOCAL MAP ---
-    // Also add the aligned scan to the local_map_
-    *local_map_ += aligned;
+    T_odom_base_ = T_alignment;
+
+    // accumulate into active submap (this is already odom frame)
+    if (!isStationary) {
+        *active_submap_ += aligned;
+    }
+
+    if (shouldCloseSubmap())
+    {
+        Submap sm;
+        sm.cloud.reset(new pcl::PointCloud<pcl::PointXYZI>(*active_submap_));
+
+        // compute center
+        Eigen::Vector3f centroid(0,0,0);
+        for (auto& p : sm.cloud->points) {
+            centroid += Eigen::Vector3f(p.x, p.y, p.z);
+        }
+        centroid /= sm.cloud->size();
+        sm.center = centroid;
+
+        submaps_.push_back(sm);
+
+        if ((int)submaps_.size() > max_submaps_) {
+            submaps_.pop_front();
+        }
+
+        active_submap_.reset(new pcl::PointCloud<pcl::PointXYZI>);
+        last_submap_pose_ = T_odom_base_;
+
+        RCLCPP_INFO(get_logger(), "Submap closed. Total: %ld",
+                    submaps_.size());
+    }
 
     // --- KEYFRAME EXTRACTION ---
     if (shouldCreateKeyframe(T_odom_base_)) {
@@ -674,55 +626,12 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
             T_odom_base_,
             full_aligned,
             msg->header.stamp
-        );
+            );
 
         last_keyframe_pose_ = T_odom_base_;
         first_keyframe_ = false;
 
         RCLCPP_INFO(get_logger(), "Keyframe created");
-    }
-
-    // trim local map to max local map size
-    // trimming is bascially being controled by the local_map_max_size_
-    // The local_map_ grows by the aligned.size() each scan.
-    // As the loca_map_ size grows the ICP align time also grows
-    // The scan_trim_size_ (#scans) must be less than local_map_max_size_/max_scan_size
-    // The closer you are to this will causethe function to update the local_map_ more oftten
-    // from the saved scan_queue.  For example if the local_map_max_size_/max_scan_size
-    // is about 50 scans and scan_trim_size is 35 then the local_map_ will get replaced
-    // by the scan_queue about every 15-20 scans.  The primary purpose of this is to keep
-    // the ICP time fairly constnat.  Too few scan will cause more iterations to solve
-    // becuase of the sparseness of the local_map_.
-
-    if (local_map_->size() > local_map_max_size_)
-    {
-        pcl::PointCloud<pcl::PointXYZI>::Ptr tmp(new pcl::PointCloud<pcl::PointXYZI>);
-
-        // copy only newest scans from scan_queue_ to tmp
-        // tmp is rebuild of the local_map_ using the last scan_trim_size_ scans in the queue
-        // scan_queue[0] is the oldest scan and scan_queue[scan_queue.size()-1] is th eoldest scan.
-        int scans_to_copy = std::min((int)scan_queue_.size(), scan_trim_size_);
-        for (int i = scan_queue_.size() - scans_to_copy; i < (int)scan_queue_.size(); ++i)
-        {
-            *tmp += *scan_queue_[i];
-        }
-
-        local_map_ = tmp; // replace map with new map of the latest scans
-
-        // downsample local_map_ if still too large
-        if (local_map_->size() > local_map_max_size_)
-        {
-            vg_local_map_.setLeafSize(voxel_leaf_, voxel_leaf_, voxel_leaf_);
-            vg_local_map_.setInputCloud(local_map_);
-            pcl::PointCloud<pcl::PointXYZI>::Ptr downsampled_map(new pcl::PointCloud<pcl::PointXYZI>);
-            vg_local_map_.filter(*downsampled_map);
-            local_map_ = downsampled_map;
-        }
-
-        RCLCPP_INFO(get_logger(),
-                    "Local map trimmed: current size = %ld points, scans = %ld",
-                    local_map_->size(),
-                    (long)scans_to_copy);
     }
 
     //------------------------------------------
@@ -752,4 +661,95 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     aligned_msg.header.stamp = msg->header.stamp;
     aligned_msg.header.frame_id = robot_frame_id_;
     aligned_cloud_pub_->publish(aligned_msg);
+}
+
+//---------------------------------------------------
+// ClampDelta
+//---------------------------------------------------
+void lidar_odometry_node::ClampDelta(Eigen::Matrix4f& delta)
+{
+    // translation clamp
+    Eigen::Vector3f t = delta.block<3,1>(0,3);
+    float dist = t.norm();
+
+    if (dist > max_predict_dist_) {
+        delta.block<3,1>(0,3) *= (max_predict_dist_ / dist);
+        RCLCPP_INFO(get_logger(), "Distance clamped");
+    }
+
+    // rotation clamp
+    Eigen::Matrix3f R = delta.block<3,3>(0,0);
+    Eigen::AngleAxisf aa(R);
+    float angle = std::abs(aa.angle());
+
+    if (angle > max_rotation_step_) {
+        float scale = max_rotation_step_ / angle;
+        aa.angle() *= scale;
+        delta.block<3,3>(0,0) = aa.toRotationMatrix();
+        RCLCPP_INFO(get_logger(), "Rotation clamped");
+    }
+}
+
+//--------------------------------------------------------
+//  buildICPTarget
+//--------------------------------------------------------
+pcl::PointCloud<pcl::PointXYZI>::Ptr lidar_odometry_node::buildICPTarget()
+{
+    pcl::PointCloud<pcl::PointXYZI>::Ptr target(
+        new pcl::PointCloud<pcl::PointXYZI>);
+
+    Eigen::Vector3f current_pos = T_odom_base_.block<3,1>(0,3);
+
+    // --- Select nearest submaps ---
+    std::vector<std::pair<float,int>> dist_idx;
+
+    for (int i = 0; i < (int)submaps_.size(); ++i) {
+        float d = (submaps_[i].center - current_pos).norm();
+        dist_idx.emplace_back(d, i);
+    }
+
+    std::sort(dist_idx.begin(), dist_idx.end());
+
+    int used = 0;
+    for (auto& di : dist_idx) {
+        if (di.first > submap_radius_) break;
+
+        *target += *(submaps_[di.second].cloud);
+        used++;
+        if (used >= max_selected_submaps_) break;
+    }
+
+    // --- Optionally include anchor ---
+    if (anchor_ready_) {
+        float d_anchor = current_pos.norm(); // assuming start at origin
+        if (d_anchor < 15.0f) {
+            *target += *anchor_submap_;
+        }
+    }
+
+    return target;
+}
+
+//--------------------------------------------------------
+//  shouldCloseSubmap
+//--------------------------------------------------------
+bool lidar_odometry_node::shouldCloseSubmap()
+{
+    if(active_submap_->size() > submap_max_points_) {
+        return true;
+    }
+
+    Eigen::Vector3f t_curr = T_odom_base_.block<3,1>(0,3);
+    Eigen::Vector3f t_last = last_submap_pose_.block<3,1>(0,3);
+
+    float dist = (t_curr - t_last).norm();
+
+    Eigen::Matrix3f R_curr = T_odom_base_.block<3,3>(0,0);
+    Eigen::Matrix3f R_last = last_submap_pose_.block<3,3>(0,0);
+
+    Eigen::Matrix3f R_delta = R_last.transpose() * R_curr;
+    float yaw = atan2(R_delta(1,0), R_delta(0,0));
+
+    return (dist > submap_dist_thresh_) ||
+           (std::abs(yaw) > submap_yaw_thresh_);
 }
