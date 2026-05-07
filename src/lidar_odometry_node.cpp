@@ -116,6 +116,9 @@
 //                          use immutable map from the 'n' closest immutable maps for ICP matching.
 //                          Added isStationary state.  This is to reduce drift due to noise when
 //                          the robot is not moving.
+//      V0.6.1  2026-05-04  Added experimental IMU processing to determine robot is stationary
+//                          Changed to multi-threaded model to support independent IMU and
+//                          point cloud subscriptions
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -125,7 +128,8 @@
 
 //--------------------------------------------------------
 //  main()
-//  This is that standard ROS2 app main for publisher node
+//  This is that standard ROS2 app multithreaded main for
+//  publisher/multi subscriber node
 //--------------------------------------------------------
 int main(int argc, char **argv)
 {
@@ -133,8 +137,17 @@ int main(int argc, char **argv)
 
     auto node = std::make_shared<lidar_odometry_node>();
 
-    rclcpp::spin(node);
+    // use multi-threaded executor
+    // use single node
+    // there will be 2 subscriptions that have
+    // callbacks that will run as separate threads.
+    rclcpp::executors::MultiThreadedExecutor executor(
+        rclcpp::ExecutorOptions(), 2);  // 2 threads is enough here
 
+    executor.add_node(node); // lidar_odometry_node
+    executor.spin();
+
+    executor.remove_node(node);
     rclcpp::shutdown();
 
     return 0;
@@ -206,6 +219,10 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<double>("max_predict_dist", 1.5); // distance in meters
     declare_parameter<double>("max_rotation_step", 45.0 * M_PI / 180.0); // max yaw rotation (45 degrees)
     declare_parameter<int>("submap_max_points", 400000); // max yaw rotation (45 degrees)
+    declare_parameter<int>("numFramesStationary", 2); // state change hysterisis (number of frames)
+    declare_parameter<double>("gyro_threshold", 0.03); // 0.005 to 0.05 depends on gyro noise
+    declare_parameter<double>("accel_std_threshold", 0.30); // 0.5 to 0.1 depends of accel noise
+    declare_parameter<int>("min_imu_samples", 20); // need at least this many frames for valid stats
 
     // Number of static position scans to acquire for the initial local map
     // before processing starts
@@ -220,6 +237,13 @@ lidar_odometry_node::lidar_odometry_node()
     get_parameter("max_predict_dist", max_predict_dist_);
     get_parameter("max_rotation_step", max_rotation_step_);
     get_parameter("submap_max_points", submap_max_points_);
+
+    get_parameter("numFramesStationary", numFramesStationary_);
+    get_parameter("gyro_threshold", gyro_threshold_);
+    get_parameter("accel_std_threshold", accel_std_threshold_);
+    int minIMUsamples;
+    get_parameter("min_imu_samples", minIMUsamples);
+    min_imu_samples_ = minIMUsamples;
 
     //voxel downsample size
     get_parameter("voxel_leaf", voxel_leaf_);
@@ -252,29 +276,34 @@ lidar_odometry_node::lidar_odometry_node()
     get_parameter("aligned_scan_topic", aligned_scan_topic_);
     get_parameter("path_topic", path_topic_);
 
+    // create multi-thread groups
+    imu_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::Reentrant);
+
+    cloud_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::Reentrant);
+
+    // subcribe to the l2lidar_node publisher /imu
+    rclcpp::SubscriptionOptions imu_opts;
+    imu_opts.callback_group = imu_group_;
+
+    auto imu_qos = rclcpp::SensorDataQoS().keep_last(100);
+
+    imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+        "/imu/data",
+        imu_qos,
+        std::bind(&lidar_odometry_node::imuCallback, this,
+                  std::placeholders::_1), imu_opts);
+
     // subscribe to the l2lidar_node publisher /points
+    rclcpp::SubscriptionOptions cloud_opts;
+    cloud_opts.callback_group = cloud_group_;
+
     cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
         "/points",
         rclcpp::SensorDataQoS(),    // this is important, do not change
-        std::bind(&lidar_odometry_node::cloudCallback, this, std::placeholders::_1)
-    );
-
-    // subcribe to the l2lidar_node publisher /imu
-    // if the l2lidar_node is publishing IMU data
-    {
-        auto publishers = this->get_publishers_info_by_topic("/imu/data");
-
-        if (publishers.empty()) {
-            // Publisher does not exist
-            RCLCPP_INFO(get_logger(), "Lidar Odometry Node no IMU subscription");
-        } else {
-            // Publisher exists
-            imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-                "/imu",
-                rclcpp::SensorDataQoS(),    // this is important, do not change
-                std::bind(&lidar_odometry_node::imuCallback, this, std::placeholders::_1));
-        }
-    }
+        std::bind(&lidar_odometry_node::cloudCallback, this,
+                  std::placeholders::_1), cloud_opts);
 
     // create new publisher odom_topic_
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10); // queue size = 10
@@ -291,9 +320,6 @@ lidar_odometry_node::lidar_odometry_node()
     // The current scan transformed from l2lidar_frame -> base_link frame
     base_link_scan_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 
-    // clear the scan queue
-    // ??? scan_queue_.clear();
-
     // ICP parameters
     icp.setTransformationEpsilon(epsilon_);
     icp.setEuclideanFitnessEpsilon(epsilon_);
@@ -305,9 +331,11 @@ lidar_odometry_node::lidar_odometry_node()
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
     // Start timer to acquire static TF
-    initStaticTF(); // start timer, retry up to 50 times
+    // initStaticTF(); // start timer, retry up to 50 times
 
     last_msg_time_ = this->get_clock()->now();
+
+    last_stamp_ = last_msg_time_;
 
     // start wathdog timer
     watchdog_timer_ = this->create_wall_timer(std::chrono::seconds(1),  // coarse check is sufficient
@@ -347,12 +375,8 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
 
     // safety check, Make sure the TFs are read before processing
     if(!static_tf_ready_) {
-        RCLCPP_WARN_THROTTLE(
-            get_logger(),
-            *get_clock(),
-            5000,
-            "Waiting for static TF before processing scans");
-        return;
+        attemptTFInit();
+        return;  // skip processing until TF is valid
     }
 
     //*************************************************************************
@@ -420,8 +444,12 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
             // This is just diagnostic
             RCLCPP_INFO(get_logger(), "Anchor map created with %ld points",
                         anchor_submap_->size());
+            // We have a complete anchor_submap_ start processing on the next scan.
+            return;
         }
-        // We have a complete anchor_submap_ start processing on the next scan.
+
+        // This is just diagnostic
+        RCLCPP_INFO(get_logger(), "Anchor map increased to %d scans", init_scans_total);
         return;
     }
 
@@ -457,7 +485,6 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
 
     // This will need inclusion of platform status in addition
     // to this calculation
-    bool isStationary;
 
     RCLCPP_INFO(get_logger(),
                 "delta distance noise: mean %.5f  std dev: %.5f",
@@ -466,8 +493,27 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
 
     Eigen::Matrix4f guess;
 
-    isStationary = (avgDistance_ < max_noiseDistance_) &&
+    bool ICPstationary = (avgDistance_ < max_noiseDistance_) &&
                    (sigmaDistance_ < max_noiseDistance_);
+
+    StationaryState IMUstationary  = computeIMUstationary();
+
+    //  | IMU        | ICP   | Result |
+    //  | ---------- | ----- | ------ |
+    //  | Moving     | TRUE  | FALSE  |
+    //  | Moving     | FALSE | FALSE  |
+    //  | Unknown    | TRUE  | TRUE   |
+    //  | Unknown    | FALSE | FALSE  |
+    //  | Stationary | TRUE  | TRUE   |
+    //  | Stationary | FALSE | FALSE  |
+    if(ICPstationary && (IMUstationary != StationaryState::Moving)) {
+        numFramesStationary_++;
+    } else {
+        numFramesStationary_ = 0;
+    }
+
+    // stats must show stationary for at least this many scans
+    bool isStationary = numFramesStationary_ > 2;
 
     if(isStationary) {
         guess = lastAlignedTF_;
@@ -548,7 +594,26 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
         // Freeze pose
         T_alignment = lastAlignedTF_;
 
-        RCLCPP_WARN(get_logger(), "Stationary: ICP motion suppressed");
+        switch(IMUstationary) {
+        case StationaryState::Unknown:
+            RCLCPP_WARN(get_logger(),
+                        "Stationary: ICP motion suppressed, ICP %b ,IMU unknown",
+                        ICPstationary);
+            break;
+
+        case StationaryState::Moving:
+            RCLCPP_WARN(get_logger(),
+                        "Stationary: ICP motion suppressed, ICP %b ,IMU moving",
+                        ICPstationary);
+            break;
+
+        case StationaryState::Stationary:
+            RCLCPP_WARN(get_logger(),
+                        "Stationary: ICP motion suppressed, ICP %b ,IMU stationary",
+                        ICPstationary);
+            break;
+        }
+
     }  else {
         // Subtract current alignment from previous alignment
         // This gives the delta movement from the last scan

@@ -451,3 +451,74 @@ bool lidar_odometry_node::shouldCreateKeyframe(const Eigen::Matrix4f& current_po
 
     return false;
 }
+
+//--------------------------------------------------------
+//  tryInitTF
+//--------------------------------------------------------
+bool lidar_odometry_node::tryInitTF()
+{
+    try
+    {
+        auto tf_base_msg = tf_buffer_->lookupTransform(
+            "base_link",
+            "l2lidar_frame",
+            rclcpp::Time(0));
+
+        auto tf_imu_msg = tf_buffer_->lookupTransform(
+            "l2lidar_frame",
+            "l2lidar_imu",
+            rclcpp::Time(0));
+
+        Eigen::Isometry3d T1 = tf2::transformToEigen(tf_base_msg.transform);
+        Eigen::Isometry3d T2 = tf2::transformToEigen(tf_imu_msg.transform);
+
+        T_base_lidar_ = T1.matrix().cast<float>();
+        T_lidar_imu_  = T2.matrix().cast<float>();
+
+        R_base_imu_ =
+            T_base_lidar_.block<3,3>(0,0) *
+            T_lidar_imu_.block<3,3>(0,0);
+
+        T_base_imu_ = T_base_lidar_ * T_lidar_imu_;
+
+        RCLCPP_INFO(get_logger(), "Static TF acquired successfully");
+
+        return true;
+    }
+    catch (tf2::TransformException &ex)
+    {
+        RCLCPP_DEBUG(get_logger(), "TF not ready: %s", ex.what());
+        return false;
+    }
+}
+
+//--------------------------------------------------------
+//  attemptTFInit
+//--------------------------------------------------------
+void lidar_odometry_node::attemptTFInit()
+{
+    if (static_tf_ready_)
+        return;
+
+    if (tf_retry_count_ >= tf_max_retries_)
+    {
+        RCLCPP_FATAL(get_logger(),
+                     "Failed to acquire static TF after %d attempts",
+                     tf_max_retries_);
+
+        // Prefer signaling failure instead of shutdown in callback thread
+        static_tf_ready_ = false;
+        return;
+    }
+
+    tf_retry_count_++;
+    RCLCPP_INFO(get_logger(),
+                 "acquire static TF attempt # %d",
+                 tf_retry_count_);
+
+    if (tryInitTF())
+    {
+        static_tf_ready_ = true;
+        tf_retry_count_ = 0;
+    }
+}

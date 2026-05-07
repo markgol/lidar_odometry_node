@@ -45,6 +45,9 @@
 //                          use immutable map from the 'n' closest immutable maps for ICP matching.
 //                          Added isStationary state.  This is to reduce drift due to noise when
 //                          the robot is not moving.
+//      V0.6.1  2026-05-04  Added experimental IMU processing to determine robot is stationary
+//                          Changed to multi-threaded model to support independent IMU and
+//                          point cloud subscriptions
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -75,8 +78,14 @@
 #include <pcl/filters/crop_box.h>
 
 #include <Eigen/Dense>
-
 #include <chrono>
+
+enum class StationaryState
+{
+    Unknown,
+    Stationary,
+    Moving
+};
 
 //--------------------------------------------------------
 //  Class lidar_odometry_node
@@ -94,7 +103,7 @@ private:    // private class methods
     // This is called whenever a new point cloud scan is received (5.55Hz for L2)
     void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg);
 
-    // This is called whenever an Imu message is received (~250Hz for L2)
+    // This is called whenever an Imu message is received (~270Hz for L2)
     void imuCallback(const sensor_msgs::msg::Imu::SharedPtr msg);
 
     // IMU integration
@@ -143,6 +152,9 @@ private:    // private class methods
     bool shouldCloseSubmap();
     void ClampDelta(Eigen::Matrix4f& delta);
 
+    // IMU helper functions
+    StationaryState computeIMUstationary();
+
     // publisher for Keyframes
     void publishKeyframe(
         const Eigen::Matrix4f& pose,
@@ -157,6 +169,7 @@ private:    // private class variables
     // ---------------------
     // ROS2 communications
     // ---------------------
+    rclcpp::CallbackGroup::SharedPtr cloud_group_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
@@ -207,19 +220,38 @@ private:    // private class variables
     // V0.6.0 changes, maps, poses, config params
     //
 
-    // --- Submap structure ---
+    // --- Submap structure and maps ---
     struct Submap {
         pcl::PointCloud<pcl::PointXYZI>::Ptr cloud;
         Eigen::Vector3f center;
     };
 
-    // --- Members ---
     pcl::PointCloud<pcl::PointXYZI>::Ptr anchor_submap_;
     bool anchor_ready_ = false;
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr active_submap_;
     std::deque<Submap> submaps_;
 
+    // --- IMU processing ---
+    struct ImuAccumulator {
+        Eigen::Vector3d gyro_sum = Eigen::Vector3d::Zero();
+        Eigen::Vector3d accel_sum = Eigen::Vector3d::Zero();
+        Eigen::Vector3d accel_sq_sum = Eigen::Vector3d::Zero();
+        uint64_t count = 0;
+
+        rclcpp::Time first_stamp{0, 0, RCL_ROS_TIME};
+        rclcpp::Time last_stamp{0, 0, RCL_ROS_TIME};
+    } imu_;
+
+    double gyro_threshold_ = 0.03;
+    double accel_std_threshold_ = 0.30;
+    uint64_t min_imu_samples_ = 20;
+
+    int numFramesStationary_ {2}; // This is set to the number of frames
+                                  // required to be stationary.  This is to correctly
+                                  // start out with stationary platform.
+
+    //
     // ------------------------------------------------------------
     // V0.6.0 new config parameters
     //
@@ -291,6 +323,7 @@ private:    // private class variables
     //------------------------------------------
     // IMU support (not yet implemented, skeleton only)
     //------------------------------------------
+    rclcpp::CallbackGroup::SharedPtr imu_group_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     std::deque<sensor_msgs::msg::Imu> imu_buffer_;
     rclcpp::Time last_scan_time_;
@@ -303,17 +336,23 @@ private:    // private class variables
     // ---------------------
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-    bool static_tf_ready_{false};
+    std::atomic <bool> static_tf_ready_{false};
+
     // retry timer
     rclcpp::TimerBase::SharedPtr tf_timer_;
     int tf_retry_count_{0};
     int tf_max_retries_{50};
+    void attemptTFInit();
+    bool tryInitTF();
 
     // watchdog
     rclcpp::Time last_msg_time_;
     long watchdog_timeout_;
     rclcpp::TimerBase::SharedPtr watchdog_timer_;
     bool shutdown_triggered_{false};
+
+    // diagnostics to be deleted after verfication
+    rclcpp::Time last_stamp_;
 
     // ---------------------
     // Diagnostic publishers for rViz2

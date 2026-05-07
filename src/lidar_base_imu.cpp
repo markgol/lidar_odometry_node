@@ -62,6 +62,7 @@
 //      V0.6.0  2026-05-04  Currently IMU data is not being used but next version
 //                          is planned to use IMU data to help confirm stationary
 //                          platform state.
+//      V0.6.1  2026-05-04  Added experimental IMU processing to determine robot is stationary
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -70,11 +71,9 @@
 #include "lidar_odometry_node.h"
 
 //--------------------------------------------------------
-//  imu callback
-//  This accumulates a queue of IMU packets
-//  This is here as placeholder for future expansion
-//  using the IMU to better estimate the pose position
-//  and provide improved deskewing
+//  imuCallback
+//  This is used to determine if the platform
+//  is stationary using IMU data.
 //--------------------------------------------------------
 void lidar_odometry_node::imuCallback(
     const sensor_msgs::msg::Imu::SharedPtr msg)
@@ -86,17 +85,83 @@ void lidar_odometry_node::imuCallback(
     if(!static_tf_ready_)
         return;
 
+    Eigen::Vector3d gyro(msg->angular_velocity.x,
+                         msg->angular_velocity.y,
+                         msg->angular_velocity.z);
+
+    Eigen::Vector3d accel(msg->linear_acceleration.x,
+                          msg->linear_acceleration.y,
+                          msg->linear_acceleration.z);
+
+    rclcpp::Time stamp(msg->header.stamp);
+
     std::lock_guard<std::mutex> lock(imu_mutex_);
 
-    // Keep only messages since last LiDAR frame
-    if (!last_scan_time_.nanoseconds()) {
-        last_scan_time_ = msg->header.stamp;
+    if (imu_.count == 0)
+        imu_.first_stamp = stamp;
+
+    imu_.last_stamp = stamp;
+
+    imu_.gyro_sum += gyro;
+
+    imu_.accel_sum += accel;
+
+    imu_.accel_sq_sum +=
+        accel.cwiseProduct(accel);
+
+    imu_.count++;
+}
+
+//--------------------------------------------------------
+//  computeIMUstationary
+//--------------------------------------------------------
+StationaryState lidar_odometry_node::computeIMUstationary()
+{
+    ImuAccumulator local;
+
+    {
+        std::lock_guard<std::mutex> lock(imu_mutex_);
+
+        if (imu_.count == 0)
+            return StationaryState::Unknown;
+
+        local = imu_;                 // copy
+        imu_ = ImuAccumulator();      // reset shared state
     }
-    long long msgTime = msg->header.stamp.sec * 1e9 + msg->header.stamp.nanosec;
-    if (msgTime > last_scan_time_.nanoseconds()) {
-        imu_queue_.push_back(msg);
-        if(imu_queue_.size()>max_imu_queue_) {
-            imu_queue_.pop_front();
-        }
+
+    // --- compute outside lock ---
+    double duration =
+        (local.last_stamp - local.first_stamp).seconds();
+
+    if (duration <= 0.0)
+        return StationaryState::Unknown;
+
+    if (local.count < min_imu_samples_)
+        return StationaryState::Unknown;
+
+    // Mean gyro
+
+    Eigen::Vector3d mean_gyro = local.gyro_sum / local.count;
+    double gyro_norm = mean_gyro.norm();
+
+    // Accel variance
+
+    Eigen::Vector3d mean_accel = local.accel_sum / local.count;
+    Eigen::Vector3d mean_accel_sq = local.accel_sq_sum / local.count;
+    Eigen::Vector3d accel_var = mean_accel_sq - mean_accel.cwiseProduct(mean_accel);
+
+    // Numerical protection
+
+    accel_var = accel_var.cwiseMax(0.0);
+    double accel_std = std::sqrt(accel_var.sum());
+
+    // Thresholds
+    bool gyro_stationary = (gyro_norm < gyro_threshold_);
+    bool accel_stationary = (accel_std < accel_std_threshold_);
+
+    if (gyro_stationary && accel_stationary) {
+        return StationaryState::Stationary;
     }
+
+    return StationaryState::Moving;
 }

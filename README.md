@@ -1,10 +1,9 @@
-### Updated 2025-05-04 V0.6.0
+### Updated 2025-05-06 V0.6.1
 
 lidar_odometry_node
 ===================
 
 This represents a major architectrual change from V0.5.1.  This just initial README.md which needs  updatin to be complete.
-
 Overview
 ===================
 
@@ -108,7 +107,9 @@ Based on **measured motion statistics**:
 
 * Standard deviation
 
-* (optionally) rotation magnitude
+* rotation magnitude
+
+* IMU statistics using gyro and accel data
 
 #### Handling
 
@@ -296,11 +297,9 @@ Future Improvements
 
 * Yaw-specific damping (preserve roll/pitch freedom)
 
-* Inclusion of IMU data in stationary determinination
+* Adaptive target selection radius (only if needed to reduce computation time)
 
-* Adaptive target selection radius (only if needed to reduce compuation time)
-
-* Integration of wheel odometry (optional)
+* Integration of wheel odometry
 
 * * *
 
@@ -355,6 +354,6 @@ This node is designed for **modular SLAM system integration**, emphasizing:
 
 V0.5.0    2026-04-15    This is the initial public release.  It is operable but has not been fully tested.  It has further development that is being done.  This initial release is part of the projects larger over-all skeleton for SLAM operation.  It explcitily does not use IMU or other odometry sensors. It relies purely on ICP SE(3) matching to determine odometry.  It has additional noise filtering to detect when the platform is not moving.  This was done to reduce drift accumulation when the platform isn't moving.  It also has a radius crop of the local map in order to reduce processing requirements.  The node assumes that the plaform is stationary when it first starts.  This allows the node to create a local map of the platform's location.
 
-
-
 V0.6.0    2026-05-04    This is major architectural change thats uses immutable submaps for ICP matching along with detection for stationary state.  This is to reduce the degeneracy when the platform is not moving and noise results in drift.
+
+V0.6.1    2026-05-06    Changed the ros2 main() to use multithreaded executor spin.  This allows the IMU and point cloud callbacks to run in indepent threads.  This keeps things like ICP from blocking receipt of the IMU data.  Also added the use of the IMU data to estimate if the robot is moving, stationary or unknown.  This is combined with the ICP results to determine if the robot is stationary.

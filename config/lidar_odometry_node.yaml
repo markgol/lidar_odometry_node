@@ -32,4 +32,9 @@ lidar_odometry_node:
   submap_yaw_thresh:  0.174532925
   max_predict_dist: 1.5
   max_rotation_step: 0.785398163
+  numFramesStationary: 2
+  gyro_threshold: 0.03
+  accel_std_threshold: 0.30
+  min_imu_samples: 20
+
 
