@@ -795,9 +795,8 @@ Changed the ros2 main() to use multithreaded executor spin. This allows the IMU 
 
 **V0.6.2**    2026-05-06
 
-Corrected major bugs involing variable initialization, deltameasured_ was initialzed on allocation.
-and shadow allocation allocation of 'guess' when stationary logic.
-Added mean guess was not initialized if not stationary.
+Corrected major bugs involing variable initialization
+    deltameasured_ was not initialzed on allocation.
+    shadow allocation allocation of 'guess' when stationary logic which meant  'guess' was not initialized if not stationary.
 Spelling correction to comments.
 Added guard checks and mutexes to various calculations and calls.
-s
