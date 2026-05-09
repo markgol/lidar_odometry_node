@@ -119,6 +119,12 @@
 //      V0.6.1  2026-05-04  Added experimental IMU processing to determine robot is stationary
 //                          Changed to multi-threaded model to support independent IMU and
 //                          point cloud subscriptions
+//      V0.6.2  2026-05-09  Corrected major bugs involing variable initialization, deltameasured_
+//                          was initialzed on allocation
+//                          and shadow allocation allocation of 'guess' when stationary logic added
+//                          meant guess was not initialized if not stationary
+//                          Spelling correction to comments
+//                          Added guard checks and mutexes to various calculations and calls
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -161,9 +167,11 @@ void lidar_odometry_node::watchdogCheck()
 {
     if (shutdown_triggered_) return;
 
+    std::lock_guard<std::mutex> lock(watchdog_mutex_);
+
     auto elapsed = this->get_clock()->now() - last_msg_time_;
 
-    // The wathdog timer triggers no subscriber topic data is received
+    // The watchdog timer triggers no subscriber topic data is received
     // for a period of time (watchdog_timeout_).
     // This can occur when the lidar sensor is powered down or has some type
     // of fault.  It also occurs if the l2lidar_node exits or hangs.
@@ -171,7 +179,7 @@ void lidar_odometry_node::watchdogCheck()
         shutdown_triggered_ = true;
 
         RCLCPP_ERROR(get_logger(),
-                     "Watchdog timeout (%.1f sec) → shutting down",
+                     "Watchdog timeout (%.1f sec) -> shutting down",
                      elapsed.seconds());
 
         rclcpp::shutdown();
@@ -209,7 +217,6 @@ lidar_odometry_node::lidar_odometry_node()
     declare_parameter<std::string>("keyframe_point_topic", "/lidar/keyframes/cloud");
     declare_parameter<std::string>("aligned_scan_topic", "/aligned_scan");
     declare_parameter<std::string>("path_topic", "/path");
-    declare_parameter<int>("max_imu_queue", 500); // 270-1000
     // V0.6.0 new configuration parameters
     declare_parameter<int>("max_submaps", 8); // 5-20
     declare_parameter<double>("submap_radius", 4.0); // distance in meters, 4.0 inside, 10.0 outside
@@ -256,7 +263,6 @@ lidar_odometry_node::lidar_odometry_node()
     get_parameter("fitness_score", fitness_score_);
     get_parameter("max_noiseDistance", max_noiseDistance_);    
     get_parameter("icp_iterations", icp_iterations_);
-    get_parameter("max_imu_queue", max_imu_queue_);
     get_parameter("odometry_frame_id", odometry_frame_id_);
     get_parameter("odom_topic", odom_topic_);
     get_parameter("robot_frame_id", robot_frame_id_);
@@ -310,8 +316,7 @@ lidar_odometry_node::lidar_odometry_node()
 
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
 
-    // local cloud map (sliding local map that contains the last 'n' scans)
-    // overtime this map moves with the robot so its frame is base_link
+    // local cloud map
     local_map_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 
     // The current scan translated filtered by voxel_laef (base_link frame)
@@ -333,11 +338,12 @@ lidar_odometry_node::lidar_odometry_node()
     // Start timer to acquire static TF
     // initStaticTF(); // start timer, retry up to 50 times
 
-    last_msg_time_ = this->get_clock()->now();
+    {
+        std::lock_guard<std::mutex> lock(watchdog_mutex_);
+        last_msg_time_ = this->get_clock()->now();
+    }
 
-    last_stamp_ = last_msg_time_;
-
-    // start wathdog timer
+    // start watchdog timer
     watchdog_timer_ = this->create_wall_timer(std::chrono::seconds(1),  // coarse check is sufficient
                                               [this]() { watchdogCheck(); }
                                               );
@@ -371,7 +377,10 @@ lidar_odometry_node::lidar_odometry_node()
 void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
 {
     // Reset watchdog timer
-    last_msg_time_ = this->get_clock()->now();
+    {
+        std::lock_guard<std::mutex> lock(watchdog_mutex_);
+        last_msg_time_ = this->get_clock()->now();
+    }
 
     // safety check, Make sure the TFs are read before processing
     if(!static_tf_ready_) {
@@ -380,7 +389,7 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     }
 
     //*************************************************************************
-    //  Data comes from the L2lidar_node puplisher
+    //  Data comes from the L2lidar_node publisher
     //  IMPORTANT:  The point cloud scan should NOT BE POSE(ROTATION) CORRECTED
     //  before being received.  This is optional in the L2lidar_node.  It should
     //  be set to false.
@@ -388,6 +397,24 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
 
     pcl::PointCloud<pcl::PointXYZI>::Ptr scan(new pcl::PointCloud<pcl::PointXYZI>);
     pcl::fromROSMsg(*msg, *scan);
+
+    // do NaN filtering on cloud points
+    // Remove invalid points before any processing
+    {
+        std::vector<int> valid_indices;
+
+        pcl::removeNaNFromPointCloud(
+            *scan,
+            *scan,
+            valid_indices);
+    }
+
+    if(scan->empty()) {
+        RCLCPP_WARN(get_logger(),
+                    "Scan empty after NaN filtering");
+        return;
+    }
+
     // scan is in the l2lidar_frame, it will need to be translated into the correct
     // frame reference
     // Note: odom is initially set to t_base_lidar_
@@ -460,7 +487,7 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     // Make intial guess for scan position
     // Currently this is using the ICP matching process to estimate movement.
     // Use of motor encoders may be more reliable predictor for movement including
-    // determinination if the robot is stationary.
+    // determination if the robot is stationary.
 
     // This initially is a guess about the translation movement
     // since the last frame.
@@ -471,7 +498,6 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
 
     // calculate distance to get running stats
     // on the translation component of deltaTransform
-    Eigen::Matrix4f deltaMeasured_;  // raw from ICP (never suppressed)
 
     Eigen::Vector3f dt = deltaMeasured_.block<3,1>(0,3);
     double distance = dt.norm(); // in meters
@@ -491,7 +517,7 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
                 avgDistance_,
                 sqrt(sigmaDistance_));
 
-    Eigen::Matrix4f guess;
+    Eigen::Matrix4f guess = Eigen::Matrix4f::Identity();
 
     bool ICPstationary = (avgDistance_ < max_noiseDistance_) &&
                    (sigmaDistance_ < max_noiseDistance_);
@@ -520,14 +546,14 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     } else {
         Eigen::Matrix4f delta_pred = deltaTransform_;
         ClampDelta(delta_pred);
-        Eigen::Matrix4f guess = lastAlignedTF_ * delta_pred;
+        guess = lastAlignedTF_ * delta_pred;
     }
     // End of guess section
 
     auto target = buildICPTarget(); // made up from submaps or anchor submap at minimum
     if (target->empty()) {
         *target += *anchor_submap_;
-    }
+    } // if target was not empty, anchor is likely already included
 
     RCLCPP_INFO(get_logger(),
                 "target map size: %ld  Scan size: %ld",
@@ -535,7 +561,10 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
                 base_link_scan_->size());
 
     // --- ICP ALIGNMENT ---
-
+    if(target->empty()) {
+        RCLCPP_WARN(get_logger(), "ICP target empty");
+        return;
+    }
     icp.setInputSource(base_link_scan_);
     icp.setInputTarget(target);
 
@@ -554,7 +583,7 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
 
     RCLCPP_INFO(get_logger(), "ICP time: %.1f ms", msec);
 
-    NumberOfScans_++;
+    number_of_scans_++;
 
     // check for solution convergence (max iterations)
     if (!icp.hasConverged())
@@ -644,7 +673,7 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
         *active_submap_ += aligned;
     }
 
-    if (shouldCloseSubmap())
+    if (shouldCloseSubmap() && !isStationary)
     {
         Submap sm;
         sm.cloud.reset(new pcl::PointCloud<pcl::PointXYZI>(*active_submap_));
@@ -654,7 +683,9 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
         for (auto& p : sm.cloud->points) {
             centroid += Eigen::Vector3f(p.x, p.y, p.z);
         }
-        centroid /= sm.cloud->size();
+
+        // shouldCloseSubmap returns false if size is 0
+        centroid /= sm.cloud->size(); // divide by 0 should never happen
         sm.center = centroid;
 
         submaps_.push_back(sm);
@@ -675,7 +706,7 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
         pcl::PointCloud<pcl::PointXYZI>::Ptr full_aligned(
             new pcl::PointCloud<pcl::PointXYZI>);
 
-        // aways use full scan for keyframe, never cropped
+        // always use full scan for keyframe, never cropped
         // scan is the full scan but needs to be TF to T_base_lidar
         // base_link_scan_ is downsampled
         pcl::PointCloud<pcl::PointXYZI>::Ptr TFscan(
@@ -707,9 +738,9 @@ void lidar_odometry_node::cloudCallback(const sensor_msgs::msg::PointCloud2::Sha
     //------------------------------------------
     // publish diagnostic odom->robot path
     //------------------------------------------
-    // currrent path behaviour should look like random noise when stationry
+    // current path behaviour should look like random noise when stationary
     // changes in rotation and translation will show with a biased non
-    // random direction which eventually collaped back to noise about the base_link frame
+    // random direction which eventually collapsed back to noise about the base_link frame
     // when the robot is stationary
     publishPath(T_odom_base_,odometry_frame_id_, msg->header.stamp);
 
@@ -744,7 +775,9 @@ void lidar_odometry_node::ClampDelta(Eigen::Matrix4f& delta)
 
     // rotation clamp
     Eigen::Matrix3f R = delta.block<3,3>(0,0);
-    Eigen::AngleAxisf aa(R);
+    Eigen::Quaternionf q(R);
+    q.normalize();
+    Eigen::AngleAxisf aa(q);
     float angle = std::abs(aa.angle());
 
     if (angle > max_rotation_step_) {
@@ -787,7 +820,8 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr lidar_odometry_node::buildICPTarget()
     // --- Optionally include anchor ---
     if (anchor_ready_) {
         float d_anchor = current_pos.norm(); // assuming start at origin
-        if (d_anchor < 15.0f) {
+        if (d_anchor < 15.0f) { // ??? review this distance,
+                                // maybe should be config param
             *target += *anchor_submap_;
         }
     }
@@ -800,6 +834,8 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr lidar_odometry_node::buildICPTarget()
 //--------------------------------------------------------
 bool lidar_odometry_node::shouldCloseSubmap()
 {
+    if(active_submap_->size()==0) return false;
+
     if(active_submap_->size() > submap_max_points_) {
         return true;
     }

@@ -48,6 +48,12 @@
 //      V0.6.1  2026-05-04  Added experimental IMU processing to determine robot is stationary
 //                          Changed to multi-threaded model to support independent IMU and
 //                          point cloud subscriptions
+//      V0.6.2  2026-05-09  Corrected major bugs involing variable initialization, deltameasured_
+//                          was initialzed on allocation
+//                          and shadow allocation allocation of 'guess' when stationary logic added
+//                          meant guess was not initialized if not stationary
+//                          Spelling correction to comments
+//                          Added guard checks and mutexes to various calculations and calls
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -183,7 +189,7 @@ private:    // private class variables
     // The current scan translated filtered by voxel_laef
     pcl::PointCloud<pcl::PointXYZI>::Ptr filtered_scan_;
 
-    // local cloud map (sliding local map that contains the last 'n' scans)
+    // local cloud map
     pcl::PointCloud<pcl::PointXYZI>::Ptr local_map_;
     // The current scan trasnformed from l2lidar_frame -> base_link frame
     pcl::PointCloud<pcl::PointXYZI>::Ptr base_link_scan_;
@@ -203,6 +209,7 @@ private:    // private class variables
     Eigen::Matrix4f lastAlignedTF_ = Eigen::Matrix4f::Identity(); // used to calculate change in pose/position
                                                                   // since the last ICP align
     Eigen::Matrix4f deltaTransform_ = Eigen::Matrix4f::Identity();// change in pose since last scan use as guess
+    Eigen::Matrix4f deltaMeasured_ = Eigen::Matrix4f::Identity();  // raw from ICP (never suppressed)
 
     std::string odometry_frame_id_; // odometry frame ID
     std::string odom_topic_; // odometry topic
@@ -321,15 +328,23 @@ private:    // private class variables
     rclcpp::Time last_keyframe_time_;
 
     //------------------------------------------
-    // IMU support (not yet implemented, skeleton only)
+    // IMU support
     //------------------------------------------
     rclcpp::CallbackGroup::SharedPtr imu_group_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
     std::deque<sensor_msgs::msg::Imu> imu_buffer_;
     rclcpp::Time last_scan_time_;
+
+    // shared global variable mutex
+    // IMU data is gathered in the seprate callback thread
+    // while the data is used in the cloud callback thread
+    //      imu_
     std::mutex imu_mutex_;
-    std::deque<sensor_msgs::msg::Imu::SharedPtr> imu_queue_;    // IMU message queue
-    int max_imu_queue_ {400};
+
+    // The watchdog timer has a shared variable that gets used
+    // in both IMU and cloud callbacks.
+    //      last_msg_time_
+    std::mutex watchdog_mutex_;
 
     // ---------------------
     // TF2
@@ -349,10 +364,7 @@ private:    // private class variables
     rclcpp::Time last_msg_time_;
     long watchdog_timeout_;
     rclcpp::TimerBase::SharedPtr watchdog_timer_;
-    bool shutdown_triggered_{false};
-
-    // diagnostics to be deleted after verfication
-    rclcpp::Time last_stamp_;
+    std::atomic<bool> shutdown_triggered_{false};
 
     // ---------------------
     // Diagnostic publishers for rViz2
@@ -368,5 +380,5 @@ private:    // private class variables
     std::string path_topic_;
 
     // diagnostic variables
-    int64_t NumberOfScans_ {0};
+    int64_t number_of_scans_ {0};
 };

@@ -130,9 +130,6 @@ void lidar_odometry_node::publishOdometry(const rclcpp::Time &stamp)
     odom.pose.pose.orientation.w = q.w();
 
     odom_pub_->publish(odom);
-    // if((NumberOfScans_%1000) == 999) {
-    //     return;
-    // }
 }
 
 //--------------------------------------------------------

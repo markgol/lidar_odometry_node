@@ -23,7 +23,6 @@ lidar_odometry_node:
   keyframe_point_topic: /lidar/keyframes/cloud
   aligned_scan_topic: /aligned_scan
   path_topic: /path
-  max_imu_queue: 540
   max_submaps: 8
   submap_max_points: 400000
   submap_radius: 4.0

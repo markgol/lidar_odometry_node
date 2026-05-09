@@ -62,7 +62,12 @@
 //      V0.6.0  2026-05-04  Currently IMU data is not being used but next version
 //                          is planned to use IMU data to help confirm stationary
 //                          platform state.
-//      V0.6.1  2026-05-04  Added experimental IMU processing to determine robot is stationary
+//      V0.6.2  2026-05-09  Corrected major bugs involing variable initialization, deltameasured_
+//                          was initialzed on allocation
+//                          and shadow allocation allocation of 'guess' when stationary logic added
+//                          meant guess was not initialized if not stationary
+//                          Spelling correction to comments
+//                          Added guard checks and mutexes to various calculations and calls
 //
 //      QtCreator IDE was used in the development
 //      This package has NO Qt depdendencies or libraries
@@ -79,7 +84,10 @@ void lidar_odometry_node::imuCallback(
     const sensor_msgs::msg::Imu::SharedPtr msg)
 {
     // Reset watchdog timer
-    last_msg_time_ = this->get_clock()->now();
+    {
+        std::lock_guard<std::mutex> lock(watchdog_mutex_);
+        last_msg_time_ = this->get_clock()->now();
+    }
 
     // TFs need initialization before receiving messages
     if(!static_tf_ready_)
@@ -97,8 +105,9 @@ void lidar_odometry_node::imuCallback(
 
     std::lock_guard<std::mutex> lock(imu_mutex_);
 
-    if (imu_.count == 0)
+    if (imu_.count == 0) {
         imu_.first_stamp = stamp;
+    }
 
     imu_.last_stamp = stamp;
 
@@ -130,8 +139,7 @@ StationaryState lidar_odometry_node::computeIMUstationary()
     }
 
     // --- compute outside lock ---
-    double duration =
-        (local.last_stamp - local.first_stamp).seconds();
+    double duration = (local.last_stamp - local.first_stamp).seconds();
 
     if (duration <= 0.0)
         return StationaryState::Unknown;
